@@ -30,7 +30,7 @@ if [ -n "$ANTHROPIC_BASE_URL" ]; then
 fi
 
 # Set up Claude Code configuration directory
-export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$WORKSPACE_DIR/.claude}"
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
 echo "=== Starting Broker Service (port 8081) ==="

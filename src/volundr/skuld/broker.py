@@ -408,13 +408,14 @@ class Broker:
                         logger.info("Using SubprocessTransport (Claude legacy)")
                         return SubprocessTransport(self.workspace_dir)
                     case _:
-                        logger.info("Using SdkWebSocketTransport (Claude SDK)")
+                        logger.info("Using SdkWebSocketTransport (Claude SDK, model: %s)", self.model)
                         return SdkWebSocketTransport(
                             workspace_dir=self.workspace_dir,
                             sdk_port=self._settings.port,
                             session_id=self.session_id,
                             skip_permissions=self._settings.skip_permissions,
                             agent_teams=self._settings.agent_teams,
+                            model=self.model,
                         )
 
     async def startup(self) -> None:

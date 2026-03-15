@@ -299,6 +299,8 @@ class DirectK8sPodManager(PodManager):
         session_config = spec.values.get("session", {})
         if session_config.get("model"):
             env.append({"name": "SESSION_MODEL", "value": session_config["model"]})
+            # Skuld broker reads MODEL env var for Claude CLI --model flag
+            env.append({"name": "MODEL", "value": session_config["model"]})
 
         # Handle extra env passthrough.
         extra_env = spec.values.get("env", {})
@@ -376,7 +378,7 @@ class DirectK8sPodManager(PodManager):
         session: Session,
         spec: SessionSpec,
     ) -> list[dict[str, Any]]:
-        """Build init containers: permissions fix + optional git clone."""
+        """Build init containers: permissions fix + credentials + optional git clone."""
         containers: list[dict[str, Any]] = [
             {
                 "name": "init-permissions",
@@ -394,6 +396,37 @@ class DirectK8sPodManager(PodManager):
                 ],
                 "volumeMounts": [
                     {"name": "workspace", "mountPath": "/volundr"},
+                ],
+                "securityContext": {"runAsUser": 0},
+            },
+            # Copy Claude Max OAuth credentials from K8s secret into $HOME/.claude/
+            {
+                "name": "init-credentials",
+                "image": "busybox:latest",
+                "command": [
+                    "sh",
+                    "-c",
+                    (
+                        "CLAUDE_DIR=${HOME}/.claude; "
+                        "mkdir -p \"$CLAUDE_DIR\"; "
+                        "if [ -f /tmp/claude-creds/.credentials.json ]; then "
+                        "  cp /tmp/claude-creds/.credentials.json \"$CLAUDE_DIR/.credentials.json\"; "
+                        "  echo 'Copied .credentials.json'; "
+                        "fi; "
+                        "if [ -f /tmp/claude-creds/settings.json ]; then "
+                        "  cp /tmp/claude-creds/settings.json \"$CLAUDE_DIR/settings.json\"; "
+                        "  echo 'Copied settings.json'; "
+                        "fi; "
+                        "chown -R 1000:1000 \"$CLAUDE_DIR\" || true; "
+                        "echo 'Claude credentials initialized'"
+                    ),
+                ],
+                "volumeMounts": [
+                    {
+                        "name": "claude-credentials",
+                        "mountPath": "/tmp/claude-creds",
+                        "readOnly": True,
+                    },
                 ],
                 "securityContext": {"runAsUser": 0},
             },
@@ -477,6 +510,14 @@ fi
             {
                 "name": "nginx-config",
                 "configMap": {"name": f"{release_name}-nginx"},
+            },
+            # Claude Max OAuth credentials from K8s secret (optional)
+            {
+                "name": "claude-credentials",
+                "secret": {
+                    "secretName": "claude-credentials",
+                    "optional": True,
+                },
             },
             *extra_volumes,
         ]
