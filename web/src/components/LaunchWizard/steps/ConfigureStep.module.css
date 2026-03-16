@@ -830,3 +830,85 @@
   border-color: var(--color-brand);
   color: var(--color-brand);
 }
+
+/* ── Mobile ── */
+@media (max-width: 430px) {
+  .container {
+    gap: var(--space-4);
+  }
+
+  .cliToolGrid {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+
+  .cliToolCard {
+    padding: var(--space-3);
+  }
+
+  .sourceTypeToggle {
+    grid-template-columns: 1fr;
+  }
+
+  .sourceTypeButton {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+  }
+
+  .mountRow {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-1);
+  }
+
+  .mountReadOnly {
+    font-size: 10px;
+  }
+
+  .resourceGrid {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2);
+  }
+
+  .addEnvRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .listRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .savePresetForm {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .yamlEditor {
+    min-height: 12rem;
+  }
+
+  .formInput,
+  .formSelect,
+  .formTextarea {
+    font-size: var(--text-xs);
+  }
+
+  .mcpTypeGroup {
+    flex-wrap: wrap;
+  }
+
+  .mcpTypeButton {
+    flex: none;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .secretGrid {
+    gap: var(--space-1);
+  }
+
+  .secretItem {
+    padding: var(--space-1) var(--space-2);
+    font-size: 10px;
+  }
+}
