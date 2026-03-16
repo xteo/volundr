@@ -237,3 +237,38 @@
   flex-direction: column;
   gap: var(--space-3);
 }
+
+/* ── Mobile: iPhone Pro and small phones (≤430px) ── */
+@media (max-width: 430px) {
+  .toolbar {
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .toolbarLeft {
+    gap: var(--space-1);
+  }
+
+  .toolbarRight {
+    gap: var(--space-1);
+  }
+
+  .controlLabel {
+    display: none;
+  }
+
+  .modelInputBar {
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .messagesContainer {
+    padding: var(--space-2);
+  }
+
+  .messagesInner {
+    gap: var(--space-3);
+  }
+
+  .inputArea {
+    padding: var(--space-1) var(--space-2) var(--space-2);
+  }
+}

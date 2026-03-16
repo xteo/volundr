@@ -249,3 +249,41 @@
 .hiddenInput {
   display: none;
 }
+
+/* ── Mobile: iPhone Pro and small phones (≤430px) ── */
+@media (max-width: 430px) {
+  .wrapper {
+    border-radius: var(--radius-xl);
+  }
+
+  .inputArea {
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+
+  .textarea {
+    font-size: 16px; /* Prevents iOS zoom on focus */
+    max-height: 120px;
+  }
+
+  .bottomBar {
+    padding: 0 var(--space-2) 6px;
+  }
+
+  .iconBtn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .sendBtn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .attachments {
+    padding: var(--space-2) var(--space-3) 0;
+  }
+
+  .attachmentName {
+    max-width: 100px;
+  }
+}
