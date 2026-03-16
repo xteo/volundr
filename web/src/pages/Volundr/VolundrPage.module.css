@@ -1168,10 +1168,185 @@
   margin-top: var(--space-1);
 }
 
+/* ─── Mobile Sidebar Overlay ─── */
+.mobileMenuButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mobileMenuIcon {
+  width: 20px;
+  height: 20px;
+}
+
+.sidebarOverlayBackdrop {
+  display: none;
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 1280px) {
   .metricsGrid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ── Mobile: iPhone Pro and small phones (≤430px) ── */
+@media (max-width: 430px) {
+  /* Hide desktop sidebar entirely */
+  .sidebarRail,
+  .sidebar {
+    display: none;
+  }
+
+  /* Show sidebar as slide-over when open */
+  .sidebar.mobileOpen {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 300px;
+    max-width: 80vw;
+    z-index: 100;
+    transform: translateX(0);
+    transition: transform var(--transition-slow) ease;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebarOverlayBackdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+    opacity: 0;
+    transition: opacity var(--transition-slow) ease;
+  }
+
+  .sidebarOverlayBackdrop.visible {
+    display: block;
+    opacity: 1;
+  }
+
+  /* Show hamburger */
+  .mobileMenuButton {
+    display: flex;
+  }
+
+  /* Session bar: compact */
+  .sessionBar {
+    padding: var(--space-1) var(--space-2);
+    gap: var(--space-1);
+  }
+
+  .sessionBarLeft {
+    gap: var(--space-1);
+    overflow: hidden;
+  }
+
+  .sessionName {
+    font-size: var(--text-xs);
+    max-width: 120px;
+  }
+
+  .sessionBarSep {
+    display: none;
+  }
+
+  .repoInfo {
+    display: none;
+  }
+
+  .modelBadge {
+    display: none;
+  }
+
+  .sessionBarRight {
+    gap: var(--space-1);
+  }
+
+  .stopButton,
+  .startButton {
+    padding: 3px 6px;
+    font-size: 11px;
+  }
+
+  .archiveButton,
+  .deleteButton {
+    width: 32px;
+    height: 32px;
+  }
+
+  /* Tab bar: horizontally scrollable */
+  .tabBar {
+    padding: var(--space-1) var(--space-2);
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .tabBar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+    gap: var(--space-1);
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 36px;
+  }
+
+  .tabIcon {
+    width: 14px;
+    height: 14px;
+  }
+
+  .popoutButton {
+    display: none;
+  }
+
+  /* Tab content: minimal padding */
+  .tabContent {
+    padding: var(--space-1);
+  }
+
+  /* Empty main state */
+  .emptyMain {
+    padding: var(--space-4);
+  }
+
+  .emptyMainIcon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .emptyMainText {
+    font-size: var(--text-xs);
+  }
+
+  /* Modal adjustments */
+  .modalContent {
+    padding: var(--space-3);
+  }
+
+  .formInput,
+  .formSelect {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
   }
 }
 

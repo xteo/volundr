@@ -31,6 +31,7 @@ import {
   Settings,
   Shield,
   LogOut,
+  Menu,
 } from 'lucide-react';
 import {
   MetricCard,
@@ -125,6 +126,9 @@ export function VolundrPage() {
 
   const [isLaunching, setIsLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+
+  // Mobile sidebar slide-over state
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   // Connect session form state
   const [connectName, setConnectName] = useState('');
@@ -630,6 +634,12 @@ export function VolundrPage() {
 
   return (
     <div className={styles.page}>
+      {/* ═══════════════ MOBILE SIDEBAR OVERLAY ═══════════════ */}
+      <div
+        className={cn(styles.sidebarOverlayBackdrop, mobileSidebarOpen && styles.visible)}
+        onClick={() => setMobileSidebarOpen(false)}
+      />
+
       {/* ═══════════════ SIDEBAR ═══════════════ */}
       {sidebarCollapsed ? (
         <div className={styles.sidebarRail}>
@@ -663,7 +673,7 @@ export function VolundrPage() {
           </div>
         </div>
       ) : (
-        <div className={styles.sidebar}>
+        <div className={cn(styles.sidebar, mobileSidebarOpen && styles.mobileOpen)}>
           {/* Sidebar header: branding + collapse */}
           <div className={styles.sidebarHeader}>
             <div className={styles.sidebarBranding}>
@@ -739,7 +749,10 @@ export function VolundrPage() {
                     styles.sessionCardWrapper,
                     effectiveSelectedSession?.id === session.id && styles.selected
                   )}
-                  onClick={() => setSelectedSession(session)}
+                  onClick={() => {
+                    setSelectedSession(session);
+                    setMobileSidebarOpen(false);
+                  }}
                 >
                   <SessionCard
                     session={
@@ -949,6 +962,14 @@ export function VolundrPage() {
           {/* Session bar */}
           <div className={styles.sessionBar}>
             <div className={styles.sessionBarLeft}>
+              <button
+                type="button"
+                className={styles.mobileMenuButton}
+                onClick={() => setMobileSidebarOpen(true)}
+                aria-label="Open menu"
+              >
+                <Menu className={styles.mobileMenuIcon} />
+              </button>
               <span className={styles.sessionName}>{effectiveSelectedSession.name}</span>
               {isManualSession && <span className={styles.manualTag}>manual</span>}
               <StatusBadge status={effectiveSelectedSession.status} />
@@ -1246,6 +1267,14 @@ export function VolundrPage() {
         </div>
       ) : (
         <div className={styles.emptyMain}>
+          <button
+            type="button"
+            className={styles.mobileMenuButton}
+            onClick={() => setMobileSidebarOpen(true)}
+            aria-label="Open menu"
+          >
+            <Menu className={styles.mobileMenuIcon} />
+          </button>
           <Hammer className={styles.emptyMainIcon} />
           <p className={styles.emptyMainText}>Select a session to view details</p>
           <button
