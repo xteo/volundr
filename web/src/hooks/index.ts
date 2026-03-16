@@ -26,6 +26,7 @@ export type { UseDiffViewerResult } from './useDiffViewer';
 export { useCredentials } from './useCredentials';
 export type { UseCredentialsResult } from './useCredentials';
 export { useIsTouchDevice } from './useIsTouchDevice';
+export { useIsMobile } from './useIsMobile';
 export { useKeyboardOffset } from './useKeyboardOffset';
 export { useIdentity } from './useIdentity';
 export type { UseIdentityResult } from './useIdentity';

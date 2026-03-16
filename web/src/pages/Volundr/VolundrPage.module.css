@@ -1170,7 +1170,7 @@
 
 /* ─── Mobile Sidebar Overlay ─── */
 .mobileMenuButton {
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   width: 36px;
@@ -1188,8 +1188,27 @@
   height: 20px;
 }
 
+.mobileOverlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 300px;
+  max-width: 80vw;
+  z-index: 100;
+  box-shadow: var(--shadow-lg);
+}
+
 .sidebarOverlayBackdrop {
   display: none;
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 99;
+}
+
+.sidebarOverlayBackdrop.visible {
+  display: block;
 }
 
 /* ─── Responsive ─── */
@@ -1201,47 +1220,6 @@
 
 /* ── Mobile: iPhone Pro and small phones (≤430px) ── */
 @media (max-width: 430px) {
-  /* Hide desktop sidebar entirely */
-  .sidebarRail,
-  .sidebar {
-    display: none;
-  }
-
-  /* Show sidebar as slide-over when open */
-  .sidebar.mobileOpen {
-    display: flex;
-    position: fixed;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 300px;
-    max-width: 80vw;
-    z-index: 100;
-    transform: translateX(0);
-    transition: transform var(--transition-slow) ease;
-    box-shadow: var(--shadow-lg);
-  }
-
-  .sidebarOverlayBackdrop {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background-color: rgba(0, 0, 0, 0.5);
-    z-index: 99;
-    opacity: 0;
-    transition: opacity var(--transition-slow) ease;
-  }
-
-  .sidebarOverlayBackdrop.visible {
-    display: block;
-    opacity: 1;
-  }
-
-  /* Show hamburger */
-  .mobileMenuButton {
-    display: flex;
-  }
-
   /* Session bar: compact */
   .sessionBar {
     padding: var(--space-1) var(--space-2);

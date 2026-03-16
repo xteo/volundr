@@ -49,7 +49,7 @@ import {
 } from '@/components';
 import { LaunchWizard } from '@/components/LaunchWizard';
 import type { LaunchConfig } from '@/components/LaunchWizard';
-import { useVolundr, useLocalStorage, useSessionProbe, useDiffViewer, useIdentity } from '@/hooks';
+import { useVolundr, useLocalStorage, useSessionProbe, useDiffViewer, useIdentity, useIsMobile } from '@/hooks';
 import { useAuth } from '@/auth';
 import { volundrService } from '@/adapters';
 import { getAccessToken } from '@/adapters/api/client';
@@ -126,6 +126,9 @@ export function VolundrPage() {
 
   const [isLaunching, setIsLaunching] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+
+  // Mobile detection — controls sidebar rendering strategy
+  const isMobile = useIsMobile();
 
   // Mobile sidebar slide-over state
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -632,16 +635,312 @@ export function VolundrPage() {
     );
   }
 
+  // Shared sidebar content (used in both desktop and mobile overlay)
+  const sidebarContent = (
+    <>
+      {/* Sidebar header: branding + collapse */}
+      <div className={styles.sidebarHeader}>
+        <div className={styles.sidebarBranding}>
+          <div className={styles.brandIcon}>
+            <Hammer className={styles.brandIconSvg} />
+          </div>
+          <div className={styles.brandText}>
+            <span className={styles.brandTitle}>Völundr</span>
+            <span className={styles.brandSubtitle}>The Crafting One</span>
+          </div>
+        </div>
+        {!isMobile && (
+          <button
+            type="button"
+            className={styles.toggleButton}
+            onClick={() => setSidebarCollapsed(true)}
+            aria-label="Collapse sidebar"
+          >
+            <ChevronLeft className={styles.toggleIcon} />
+          </button>
+        )}
+      </div>
+
+      {/* Action buttons */}
+      <div className={styles.sidebarActions}>
+        <div className={styles.actionRow}>
+          <button
+            type="button"
+            className={styles.newButton}
+            onClick={() => setShowLaunchWizard(true)}
+          >
+            <Plus className={styles.actionBtnIcon} />
+            New Session
+          </button>
+          <button
+            type="button"
+            className={styles.connectButton}
+            onClick={() => setShowConnectModal(true)}
+          >
+            <Link className={styles.actionBtnIcon} />
+            Connect
+          </button>
+        </div>
+      </div>
+
+      {/* Search + filter */}
+      <div className={styles.sidebarFilters}>
+        <SearchInput
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="Search sessions..."
+        />
+        <select
+          className={styles.statusSelect}
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value)}
+        >
+          {STATUS_OPTIONS.map(opt => (
+            <option key={opt} value={opt}>
+              {opt.charAt(0).toUpperCase() + opt.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Session list — grouped by repository */}
+      <div className={styles.sessionsList}>
+        <SessionGroupList
+          sessions={filteredSessions}
+          searchQuery={searchQuery}
+          renderSession={session => (
+            <div
+              key={session.id}
+              className={cn(
+                styles.sessionCardWrapper,
+                effectiveSelectedSession?.id === session.id && styles.selected
+              )}
+              onClick={() => {
+                setSelectedSession(session);
+                setMobileSidebarOpen(false);
+              }}
+            >
+              <SessionCard
+                session={
+                  liveChatCount !== null && effectiveSelectedSession?.id === session.id
+                    ? { ...session, messageCount: liveChatCount }
+                    : session
+                }
+                model={models[session.model]}
+              />
+            </div>
+          )}
+        />
+      </div>
+
+      {/* Archive all stopped + archived section */}
+      <div className={styles.archivedSection}>
+        <div
+          className={styles.archivedToggle}
+          role="button"
+          tabIndex={0}
+          onClick={() => setArchivedCollapsed(!archivedCollapsed)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') setArchivedCollapsed(!archivedCollapsed);
+          }}
+        >
+          <div className={styles.archivedToggleLeft}>
+            <Archive className={styles.archivedToggleIcon} />
+            <span className={styles.archivedToggleTitle}>Archived</span>
+            {archivedSessions.length > 0 && (
+              <span className={styles.archivedCount}>{archivedSessions.length}</span>
+            )}
+          </div>
+          <div className={styles.archivedChevron}>
+            {archivedCollapsed ? (
+              <ChevronRight className={styles.archivedChevronIcon} />
+            ) : (
+              <ChevronDown className={styles.archivedChevronIcon} />
+            )}
+          </div>
+        </div>
+
+        {!archivedCollapsed && (
+          <div className={styles.archivedContent}>
+            {stoppedSessionCount > 0 && (
+              <div className={styles.archivedItem}>
+                <button
+                  type="button"
+                  className={styles.archiveAllButton}
+                  onClick={handleArchiveAllStopped}
+                >
+                  <Archive className={styles.archiveAllButtonIcon} />
+                  Archive All Stopped ({stoppedSessionCount})
+                </button>
+              </div>
+            )}
+            {archivedSessions.map(session => (
+              <div key={session.id} className={styles.archivedItem}>
+                <div className={styles.archivedItemInfo}>
+                  <span className={styles.archivedItemName}>{session.name}</span>
+                  <span className={styles.archivedItemMeta}>
+                    {getSourceLabel(session.source)} &middot;{' '}
+                    {formatArchivedDate(session.archivedAt)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={styles.restoreButton}
+                  onClick={() => handleRestoreSession(session.id)}
+                >
+                  <RotateCcw className={styles.restoreButtonIcon} />
+                  Restore
+                </button>
+              </div>
+            ))}
+            {archivedSessions.length === 0 && (
+              <div className={styles.archivedItem}>
+                <span className={styles.archivedItemMeta}>No archived sessions</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Settings & Admin buttons */}
+      <div className={styles.sidebarActions}>
+        <button
+          type="button"
+          className={styles.settingsButton}
+          onClick={() => navigate('/settings')}
+        >
+          <Settings className={styles.settingsButtonIcon} />
+          <span className={styles.settingsButtonLabel}>Settings</span>
+        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            className={styles.settingsButton}
+            onClick={() => navigate('/admin')}
+          >
+            <Shield className={styles.settingsButtonIcon} />
+            <span className={styles.settingsButtonLabel}>Admin</span>
+          </button>
+        )}
+        {authEnabled && (
+          <button type="button" className={styles.settingsButton} onClick={logout}>
+            <LogOut className={styles.settingsButtonIcon} />
+            <span className={styles.settingsButtonLabel}>Sign out</span>
+          </button>
+        )}
+      </div>
+
+      {/* Forge stats footer */}
+      <div className={styles.forgeStats} data-collapsed={statsCollapsed}>
+        <button
+          type="button"
+          className={styles.forgeStatsToggle}
+          onClick={() => setStatsCollapsed(!statsCollapsed)}
+        >
+          <div className={styles.forgeStatsLeft}>
+            <Hammer className={styles.forgeStatsIcon} />
+            <span className={styles.forgeStatsTitle}>Forge Stats</span>
+          </div>
+          {statsCollapsed && (
+            <div className={styles.inlineStats}>
+              <span className={styles.inlineStat}>
+                <Activity className={styles.inlineStatIcon} data-color="emerald" />
+                <span className={styles.inlineStatValue}>{stats.activeSessions}</span>
+              </span>
+              <span className={styles.inlineStatSep} />
+              <span className={styles.inlineStat}>
+                <BarChart3 className={styles.inlineStatIcon} data-color="cyan" />
+                <span className={styles.inlineStatValue}>
+                  {formatTokens(stats.tokensToday)}
+                </span>
+              </span>
+              <span className={styles.inlineStatSep} />
+              <span className={styles.inlineStat}>
+                <DollarSign className={styles.inlineStatIcon} data-color="amber" />
+                <span className={styles.inlineStatValue}>${stats.costToday.toFixed(2)}</span>
+              </span>
+            </div>
+          )}
+          <div className={styles.forgeStatsChevron}>
+            {statsCollapsed ? (
+              <ChevronRight className={styles.forgeStatsChevronIcon} />
+            ) : (
+              <ChevronDown className={styles.forgeStatsChevronIcon} />
+            )}
+          </div>
+        </button>
+
+        {!statsCollapsed && (
+          <div className={styles.forgeStatsContent}>
+            <div className={styles.metricsGrid}>
+              <MetricCard
+                label="Active"
+                value={stats.activeSessions}
+                subtext="sessions"
+                icon={Activity}
+                iconColor="emerald"
+              />
+              <MetricCard
+                label="Total"
+                value={stats.totalSessions}
+                subtext="sessions"
+                icon={Database}
+                iconColor="purple"
+              />
+              <MetricCard
+                label="Tokens"
+                value={formatTokens(stats.tokensToday)}
+                subtext="today"
+                icon={BarChart3}
+                iconColor="cyan"
+              />
+              <MetricCard
+                label="Local"
+                value={formatTokens(stats.localTokens)}
+                subtext="GPU"
+                icon={Zap}
+                iconColor="emerald"
+              />
+              <MetricCard
+                label="Cloud"
+                value={formatTokens(stats.cloudTokens)}
+                subtext="API"
+                icon={Server}
+                iconColor="purple"
+              />
+              <MetricCard
+                label="Cost"
+                value={`$${stats.costToday.toFixed(2)}`}
+                subtext="today"
+                icon={DollarSign}
+                iconColor="amber"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div className={styles.page}>
       {/* ═══════════════ MOBILE SIDEBAR OVERLAY ═══════════════ */}
-      <div
-        className={cn(styles.sidebarOverlayBackdrop, mobileSidebarOpen && styles.visible)}
-        onClick={() => setMobileSidebarOpen(false)}
-      />
+      {isMobile && mobileSidebarOpen && (
+        <div
+          className={cn(styles.sidebarOverlayBackdrop, styles.visible)}
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
 
       {/* ═══════════════ SIDEBAR ═══════════════ */}
-      {sidebarCollapsed ? (
+      {isMobile ? (
+        /* Mobile: sidebar only renders as fixed overlay when open */
+        mobileSidebarOpen && (
+          <div className={cn(styles.sidebar, styles.mobileOverlay)}>
+            {sidebarContent}
+          </div>
+        )
+      ) : sidebarCollapsed ? (
         <div className={styles.sidebarRail}>
           <button
             type="button"
@@ -673,286 +972,8 @@ export function VolundrPage() {
           </div>
         </div>
       ) : (
-        <div className={cn(styles.sidebar, mobileSidebarOpen && styles.mobileOpen)}>
-          {/* Sidebar header: branding + collapse */}
-          <div className={styles.sidebarHeader}>
-            <div className={styles.sidebarBranding}>
-              <div className={styles.brandIcon}>
-                <Hammer className={styles.brandIconSvg} />
-              </div>
-              <div className={styles.brandText}>
-                <span className={styles.brandTitle}>Völundr</span>
-                <span className={styles.brandSubtitle}>The Crafting One</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className={styles.toggleButton}
-              onClick={() => setSidebarCollapsed(true)}
-              aria-label="Collapse sidebar"
-            >
-              <ChevronLeft className={styles.toggleIcon} />
-            </button>
-          </div>
-
-          {/* Action buttons */}
-          <div className={styles.sidebarActions}>
-            <div className={styles.actionRow}>
-              <button
-                type="button"
-                className={styles.newButton}
-                onClick={() => setShowLaunchWizard(true)}
-              >
-                <Plus className={styles.actionBtnIcon} />
-                New Session
-              </button>
-              <button
-                type="button"
-                className={styles.connectButton}
-                onClick={() => setShowConnectModal(true)}
-              >
-                <Link className={styles.actionBtnIcon} />
-                Connect
-              </button>
-            </div>
-          </div>
-
-          {/* Search + filter */}
-          <div className={styles.sidebarFilters}>
-            <SearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search sessions..."
-            />
-            <select
-              className={styles.statusSelect}
-              value={statusFilter}
-              onChange={e => setStatusFilter(e.target.value)}
-            >
-              {STATUS_OPTIONS.map(opt => (
-                <option key={opt} value={opt}>
-                  {opt.charAt(0).toUpperCase() + opt.slice(1)}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Session list — grouped by repository */}
-          <div className={styles.sessionsList}>
-            <SessionGroupList
-              sessions={filteredSessions}
-              searchQuery={searchQuery}
-              renderSession={session => (
-                <div
-                  key={session.id}
-                  className={cn(
-                    styles.sessionCardWrapper,
-                    effectiveSelectedSession?.id === session.id && styles.selected
-                  )}
-                  onClick={() => {
-                    setSelectedSession(session);
-                    setMobileSidebarOpen(false);
-                  }}
-                >
-                  <SessionCard
-                    session={
-                      liveChatCount !== null && effectiveSelectedSession?.id === session.id
-                        ? { ...session, messageCount: liveChatCount }
-                        : session
-                    }
-                    model={models[session.model]}
-                  />
-                </div>
-              )}
-            />
-          </div>
-
-          {/* Archive all stopped + archived section */}
-          <div className={styles.archivedSection}>
-            <div
-              className={styles.archivedToggle}
-              role="button"
-              tabIndex={0}
-              onClick={() => setArchivedCollapsed(!archivedCollapsed)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' || e.key === ' ') setArchivedCollapsed(!archivedCollapsed);
-              }}
-            >
-              <div className={styles.archivedToggleLeft}>
-                <Archive className={styles.archivedToggleIcon} />
-                <span className={styles.archivedToggleTitle}>Archived</span>
-                {archivedSessions.length > 0 && (
-                  <span className={styles.archivedCount}>{archivedSessions.length}</span>
-                )}
-              </div>
-              <div className={styles.archivedChevron}>
-                {archivedCollapsed ? (
-                  <ChevronRight className={styles.archivedChevronIcon} />
-                ) : (
-                  <ChevronDown className={styles.archivedChevronIcon} />
-                )}
-              </div>
-            </div>
-
-            {!archivedCollapsed && (
-              <div className={styles.archivedContent}>
-                {stoppedSessionCount > 0 && (
-                  <div className={styles.archivedItem}>
-                    <button
-                      type="button"
-                      className={styles.archiveAllButton}
-                      onClick={handleArchiveAllStopped}
-                    >
-                      <Archive className={styles.archiveAllButtonIcon} />
-                      Archive All Stopped ({stoppedSessionCount})
-                    </button>
-                  </div>
-                )}
-                {archivedSessions.map(session => (
-                  <div key={session.id} className={styles.archivedItem}>
-                    <div className={styles.archivedItemInfo}>
-                      <span className={styles.archivedItemName}>{session.name}</span>
-                      <span className={styles.archivedItemMeta}>
-                        {getSourceLabel(session.source)} &middot;{' '}
-                        {formatArchivedDate(session.archivedAt)}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className={styles.restoreButton}
-                      onClick={() => handleRestoreSession(session.id)}
-                    >
-                      <RotateCcw className={styles.restoreButtonIcon} />
-                      Restore
-                    </button>
-                  </div>
-                ))}
-                {archivedSessions.length === 0 && (
-                  <div className={styles.archivedItem}>
-                    <span className={styles.archivedItemMeta}>No archived sessions</span>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Settings & Admin buttons */}
-          <div className={styles.sidebarActions}>
-            <button
-              type="button"
-              className={styles.settingsButton}
-              onClick={() => navigate('/settings')}
-            >
-              <Settings className={styles.settingsButtonIcon} />
-              <span className={styles.settingsButtonLabel}>Settings</span>
-            </button>
-            {isAdmin && (
-              <button
-                type="button"
-                className={styles.settingsButton}
-                onClick={() => navigate('/admin')}
-              >
-                <Shield className={styles.settingsButtonIcon} />
-                <span className={styles.settingsButtonLabel}>Admin</span>
-              </button>
-            )}
-            {authEnabled && (
-              <button type="button" className={styles.settingsButton} onClick={logout}>
-                <LogOut className={styles.settingsButtonIcon} />
-                <span className={styles.settingsButtonLabel}>Sign out</span>
-              </button>
-            )}
-          </div>
-
-          {/* Forge stats footer */}
-          <div className={styles.forgeStats} data-collapsed={statsCollapsed}>
-            <button
-              type="button"
-              className={styles.forgeStatsToggle}
-              onClick={() => setStatsCollapsed(!statsCollapsed)}
-            >
-              <div className={styles.forgeStatsLeft}>
-                <Hammer className={styles.forgeStatsIcon} />
-                <span className={styles.forgeStatsTitle}>Forge Stats</span>
-              </div>
-              {statsCollapsed && (
-                <div className={styles.inlineStats}>
-                  <span className={styles.inlineStat}>
-                    <Activity className={styles.inlineStatIcon} data-color="emerald" />
-                    <span className={styles.inlineStatValue}>{stats.activeSessions}</span>
-                  </span>
-                  <span className={styles.inlineStatSep} />
-                  <span className={styles.inlineStat}>
-                    <BarChart3 className={styles.inlineStatIcon} data-color="cyan" />
-                    <span className={styles.inlineStatValue}>
-                      {formatTokens(stats.tokensToday)}
-                    </span>
-                  </span>
-                  <span className={styles.inlineStatSep} />
-                  <span className={styles.inlineStat}>
-                    <DollarSign className={styles.inlineStatIcon} data-color="amber" />
-                    <span className={styles.inlineStatValue}>${stats.costToday.toFixed(2)}</span>
-                  </span>
-                </div>
-              )}
-              <div className={styles.forgeStatsChevron}>
-                {statsCollapsed ? (
-                  <ChevronRight className={styles.forgeStatsChevronIcon} />
-                ) : (
-                  <ChevronDown className={styles.forgeStatsChevronIcon} />
-                )}
-              </div>
-            </button>
-
-            {!statsCollapsed && (
-              <div className={styles.forgeStatsContent}>
-                <div className={styles.metricsGrid}>
-                  <MetricCard
-                    label="Active"
-                    value={stats.activeSessions}
-                    subtext="sessions"
-                    icon={Activity}
-                    iconColor="emerald"
-                  />
-                  <MetricCard
-                    label="Total"
-                    value={stats.totalSessions}
-                    subtext="sessions"
-                    icon={Database}
-                    iconColor="purple"
-                  />
-                  <MetricCard
-                    label="Tokens"
-                    value={formatTokens(stats.tokensToday)}
-                    subtext="today"
-                    icon={BarChart3}
-                    iconColor="cyan"
-                  />
-                  <MetricCard
-                    label="Local"
-                    value={formatTokens(stats.localTokens)}
-                    subtext="GPU"
-                    icon={Zap}
-                    iconColor="emerald"
-                  />
-                  <MetricCard
-                    label="Cloud"
-                    value={formatTokens(stats.cloudTokens)}
-                    subtext="API"
-                    icon={Server}
-                    iconColor="purple"
-                  />
-                  <MetricCard
-                    label="Cost"
-                    value={`$${stats.costToday.toFixed(2)}`}
-                    subtext="today"
-                    icon={DollarSign}
-                    iconColor="amber"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
+        <div className={styles.sidebar}>
+          {sidebarContent}
         </div>
       )}
 
@@ -962,14 +983,16 @@ export function VolundrPage() {
           {/* Session bar */}
           <div className={styles.sessionBar}>
             <div className={styles.sessionBarLeft}>
-              <button
-                type="button"
-                className={styles.mobileMenuButton}
-                onClick={() => setMobileSidebarOpen(true)}
-                aria-label="Open menu"
-              >
-                <Menu className={styles.mobileMenuIcon} />
-              </button>
+              {isMobile && (
+                <button
+                  type="button"
+                  className={styles.mobileMenuButton}
+                  onClick={() => setMobileSidebarOpen(true)}
+                  aria-label="Open menu"
+                >
+                  <Menu className={styles.mobileMenuIcon} />
+                </button>
+              )}
               <span className={styles.sessionName}>{effectiveSelectedSession.name}</span>
               {isManualSession && <span className={styles.manualTag}>manual</span>}
               <StatusBadge status={effectiveSelectedSession.status} />
@@ -1267,14 +1290,16 @@ export function VolundrPage() {
         </div>
       ) : (
         <div className={styles.emptyMain}>
-          <button
-            type="button"
-            className={styles.mobileMenuButton}
-            onClick={() => setMobileSidebarOpen(true)}
-            aria-label="Open menu"
-          >
-            <Menu className={styles.mobileMenuIcon} />
-          </button>
+          {isMobile && (
+            <button
+              type="button"
+              className={styles.mobileMenuButton}
+              onClick={() => setMobileSidebarOpen(true)}
+              aria-label="Open menu"
+            >
+              <Menu className={styles.mobileMenuIcon} />
+            </button>
+          )}
           <Hammer className={styles.emptyMainIcon} />
           <p className={styles.emptyMainText}>Select a session to view details</p>
           <button
