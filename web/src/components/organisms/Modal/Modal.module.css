@@ -94,3 +94,30 @@
   flex: 1;
   overflow-y: auto;
 }
+
+/* ── Mobile: fullscreen modals ── */
+@media (max-width: 430px) {
+  .overlay {
+    padding: var(--space-2);
+  }
+
+  .modal {
+    max-height: 90vh;
+    border-radius: var(--radius-lg);
+  }
+
+  .sm,
+  .md,
+  .lg,
+  .xl {
+    max-width: 100%;
+  }
+
+  .header {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .title {
+    font-size: var(--text-base);
+  }
+}

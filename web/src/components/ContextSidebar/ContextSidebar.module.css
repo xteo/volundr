@@ -354,3 +354,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Mobile: hide context sidebar on small screens ── */
+@media (max-width: 430px) {
+  .container {
+    display: none;
+  }
+}
