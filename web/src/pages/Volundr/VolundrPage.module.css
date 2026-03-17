@@ -102,6 +102,11 @@
   padding: var(--space-2) var(--space-3);
 }
 
+.sidebarFooterActions {
+  display: flex;
+  flex-direction: column;
+}
+
 .actionRow {
   display: flex;
   gap: var(--space-2);
@@ -349,12 +354,6 @@
 .archiveAllButtonIcon {
   width: 12px;
   height: 12px;
-}
-
-/* ─── Sidebar Actions ─── */
-.sidebarActions {
-  display: flex;
-  flex-direction: column;
 }
 
 .settingsButton {

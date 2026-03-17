@@ -16,6 +16,7 @@ vi.mock('@/hooks', async () => {
   return {
     useVolundr: vi.fn(),
     useLocalStorage: vi.fn(() => [false, vi.fn()]),
+    useIsMobile: vi.fn(() => false),
     // Simulate the probe verifying connectivity immediately via useEffect
     // so that tests for 'running' sessions see the chat/terminal.
     useSessionProbe: vi.fn(({ enabled, onReady }: { enabled: boolean; onReady: () => void }) => {

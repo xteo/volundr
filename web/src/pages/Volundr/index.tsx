@@ -803,7 +803,7 @@ export function VolundrPage() {
       </div>
 
       {/* Settings & Admin buttons */}
-      <div className={styles.sidebarActions}>
+      <div className={styles.sidebarFooterActions}>
         <button
           type="button"
           className={styles.settingsButton}
