@@ -1,7 +1,12 @@
 .niuu-shell {
   display: grid;
-  grid-template-columns: 48px auto 1fr;
-  grid-template-rows: 48px 1fr 28px;
+  grid-template-columns: 48px auto minmax(0, 1fr);
+  /* minmax(0, 1fr) on the content row: a bare 1fr track has min-height:auto,
+     so it refuses to shrink below its content's intrinsic height. Tall plugin
+     content (Volundr logs/chat) then grew this track past the viewport and the
+     whole content frame scrolled instead of the inner area. minmax(0, …) lets
+     the track shrink to its share so plugins' own overflow containers scroll. */
+  grid-template-rows: 48px minmax(0, 1fr) 28px;
   grid-template-areas:
     'rail topbar topbar'
     'rail subnav content'
