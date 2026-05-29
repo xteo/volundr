@@ -141,6 +141,9 @@ export default defineConfig({
     // reachable over Tailscale, and proxy API/SSE/WS to the live niuu backend
     // on :8080 so the preview shows real Forge data.
     host: true,
+    // Reached via the Tailscale MagicDNS name (thor-host.…ts.net), so vite's
+    // host check must allow it. Trusted-tailnet dev preview only.
+    allowedHosts: true,
     proxy: {
       '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
       '/config.json': { target: 'http://127.0.0.1:8080', changeOrigin: true },
