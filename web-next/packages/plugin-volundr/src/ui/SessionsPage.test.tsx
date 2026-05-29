@@ -360,6 +360,8 @@ describe('SessionsPage', () => {
   });
 
   it('renders the forge label when a session has an instance name', async () => {
+    // The forge/cluster id is debug metadata, hidden unless explicitly enabled.
+    window.localStorage.setItem('niuu.lexiUx.showDebugMeta', '1');
     const store = createSessionStoreWithSessions([
       makeSession({
         id: 'forge-1',
@@ -370,11 +372,31 @@ describe('SessionsPage', () => {
       }),
     ]);
 
+    try {
+      wrap(store);
+      await waitFor(() => expect(screen.getByTestId('pod-entry-forge-1')).toBeInTheDocument());
+      const row = screen.getByTestId('pod-entry-forge-1');
+      expect(row).toHaveTextContent(/forge/i);
+      expect(row).toHaveTextContent('Guild Alpha');
+    } finally {
+      window.localStorage.removeItem('niuu.lexiUx.showDebugMeta');
+    }
+  });
+
+  it('hides the forge label by default (debug metadata off)', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({
+        id: 'forge-2',
+        personaName: 'forge test',
+        state: 'running',
+        clusterId: 'guild-alpha',
+        clusterName: 'Guild Alpha',
+      }),
+    ]);
+
     wrap(store);
-    await waitFor(() => expect(screen.getByTestId('pod-entry-forge-1')).toBeInTheDocument());
-    const row = screen.getByTestId('pod-entry-forge-1');
-    expect(row).toHaveTextContent(/forge/i);
-    expect(row).toHaveTextContent('Guild Alpha');
+    await waitFor(() => expect(screen.getByTestId('pod-entry-forge-2')).toBeInTheDocument());
+    expect(screen.getByTestId('pod-entry-forge-2')).not.toHaveTextContent('Guild Alpha');
   });
 
   it('shows archive-all-stopped action and calls the service', async () => {

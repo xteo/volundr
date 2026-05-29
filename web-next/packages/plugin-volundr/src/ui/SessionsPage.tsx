@@ -9,6 +9,7 @@ import { LaunchWizard } from './LaunchWizard';
 import { useSessionList } from './hooks/useSessionStore';
 import { groupByState } from './sessions/groupByState';
 import { LiveSessionDetailPage } from './LiveSessionDetailPage';
+import { getShowDebugMeta } from './uxPrefs';
 import type { Session, SessionState } from '../domain/session';
 import type { IVolundrService } from '../ports/IVolundrService';
 import './scrollbar-themed.css';
@@ -179,7 +180,9 @@ function PodEntry({
   const sourceParts =
     previewLabel && looksLikeRepoLabel(previewLabel) ? compactSourceParts(previewLabel) : null;
   const showPreviewFallback = previewLabel && !sourceParts;
-  const forgeLabel = session.clusterName ?? session.clusterId;
+  // Forge/cluster id is platform plumbing — hidden unless the operator opts into
+  // debug metadata. See uxPrefs.getShowDebugMeta.
+  const forgeLabel = getShowDebugMeta() ? (session.clusterName ?? session.clusterId) : undefined;
   // Zebra striping: subtle alternating background on even rows. Inline so it
   // works without the prebuilt niuu-* utilities being recompiled in dev.
   const zebraBg = selected ? undefined : index % 2 === 1 ? 'rgba(255,255,255,0.025)' : undefined;
