@@ -284,7 +284,48 @@ export function extractInlineImages(content: string): {
   text: string;
   attachments: AttachmentMeta[];
 } {
-  if (!content || content.length < 200) return { text: content, attachments: [] };
+  if (!content) return { text: content, attachments: [] };
+  // Case 1: content is a JSON-stringified array of Anthropic content blocks —
+  // how a user message WITH an image is actually stored on the turn, e.g.
+  // [{type:"text",text:"…"},{type:"image",source:{type:"base64",media_type,data}}].
+  // Parse text blocks -> message text, image blocks -> attachments with a
+  // data-URI preview. (Verified against /sessions/:id/conversation live data.)
+  const trimmed = content.trim();
+  if (trimmed.startsWith('[') && trimmed.includes('"type"')) {
+    try {
+      const blocks: unknown = JSON.parse(trimmed);
+      if (Array.isArray(blocks)) {
+        const texts: string[] = [];
+        const blockAtts: AttachmentMeta[] = [];
+        for (const b of blocks) {
+          if (!b || typeof b !== 'object') continue;
+          const block = b as { type?: unknown; text?: unknown; source?: unknown };
+          if (block.type === 'text' && typeof block.text === 'string') {
+            texts.push(block.text);
+          } else if (block.type === 'image') {
+            const src = (block.source ?? {}) as { media_type?: unknown; data?: unknown };
+            const data = typeof src.data === 'string' ? src.data : '';
+            if (data) {
+              const mime = typeof src.media_type === 'string' ? src.media_type : 'image/png';
+              blockAtts.push({
+                name: 'image',
+                type: 'image',
+                size: Math.floor((data.length * 3) / 4),
+                contentType: mime,
+                previewUrl: `data:${mime};base64,${data}`,
+              });
+            }
+          }
+        }
+        if (blockAtts.length > 0)
+          return { text: texts.join('\n\n').trim(), attachments: blockAtts };
+      }
+    } catch {
+      /* not a content-block array — fall through to the plain-text scan */
+    }
+  }
+  // Case 2: plain text with an embedded data: URI or bare base64 blob.
+  if (content.length < 200) return { text: content, attachments: [] };
   const attachments: AttachmentMeta[] = [];
   const add = (mime: string, dataUri: string, b64Len: number) => {
     attachments.push({
@@ -381,18 +422,27 @@ export function serializeAgentEvents(
 }
 
 export function transformTurns(turns: ConversationTurn[]): ChatMessage[] {
-  return turns.map((turn) => ({
-    id: turn.id,
-    role: turn.role === 'user' ? 'user' : 'assistant',
-    content: turn.content,
-    createdAt: new Date(turn.created_at),
-    status: 'done',
-    parts: turn.parts as ChatMessagePart[] | undefined,
-    metadata: turn.metadata as ChatMessage['metadata'] | undefined,
-    participant: parseParticipantMeta(turn.participant_meta as Record<string, unknown> | undefined),
-    threadId: turn.thread_id,
-    visibility: turn.visibility,
-  }));
+  return turns.map((turn) => {
+    // Server history stores user turns with dropped images as a JSON
+    // content-blocks array (or inline base64). Lift those out so the message
+    // renders its text + a thumbnail attachment instead of raw base64.
+    const { text, attachments } = extractInlineImages(turn.content);
+    return {
+      id: turn.id,
+      role: turn.role === 'user' ? 'user' : 'assistant',
+      content: text,
+      createdAt: new Date(turn.created_at),
+      status: 'done',
+      parts: turn.parts as ChatMessagePart[] | undefined,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      metadata: turn.metadata as ChatMessage['metadata'] | undefined,
+      participant: parseParticipantMeta(
+        turn.participant_meta as Record<string, unknown> | undefined,
+      ),
+      threadId: turn.thread_id,
+      visibility: turn.visibility,
+    };
+  });
 }
 
 export function participantsFromTurns(turns: ConversationTurn[]): Map<string, RoomParticipant> {
