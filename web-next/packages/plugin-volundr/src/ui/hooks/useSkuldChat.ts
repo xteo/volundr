@@ -260,13 +260,71 @@ export function getStringArray(
     : undefined;
 }
 
+const IMAGE_DATA_URI_RE = /data:image\/[a-zA-Z+]+;base64,[A-Za-z0-9+/=]+/g;
+// Bare base64 image blobs (no data: prefix), detected by image magic bytes.
+const BARE_IMAGE_B64_RE = /(?:\/9j\/|iVBORw0KGgo|R0lGOD[lh]|UklGR)[A-Za-z0-9+/=]{200,}/g;
+
+function inferImageMime(b64: string): string {
+  if (b64.startsWith('/9j/')) return 'image/jpeg';
+  if (b64.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (b64.startsWith('R0lGOD')) return 'image/gif';
+  if (b64.startsWith('UklGR')) return 'image/webp';
+  return 'image/png';
+}
+
+/**
+ * Lift inline base64 images out of a message's text `content` into attachment
+ * metadata (with a data-URI previewUrl), returning the cleaned text. Server
+ * history turns (transformTurns) and older persisted messages can carry a
+ * base64 image inside `content`; without this it renders as a giant base64
+ * string instead of a small image. Handles both `data:image/...;base64,...`
+ * URIs and bare base64 blobs (image magic bytes).
+ */
+export function extractInlineImages(content: string): {
+  text: string;
+  attachments: AttachmentMeta[];
+} {
+  if (!content || content.length < 200) return { text: content, attachments: [] };
+  const attachments: AttachmentMeta[] = [];
+  const add = (mime: string, dataUri: string, b64Len: number) => {
+    attachments.push({
+      name: 'image',
+      type: 'image',
+      size: Math.floor((b64Len * 3) / 4),
+      contentType: mime,
+      previewUrl: dataUri,
+    });
+  };
+  let text = content.replace(IMAGE_DATA_URI_RE, (uri) => {
+    const mime = uri.slice(5, uri.indexOf(';')) || 'image/png';
+    const b64 = uri.slice(uri.indexOf(',') + 1);
+    add(mime, uri, b64.length);
+    return '';
+  });
+  text = text.replace(BARE_IMAGE_B64_RE, (b64) => {
+    const mime = inferImageMime(b64);
+    add(mime, `data:${mime};base64,${b64}`, b64.length);
+    return '';
+  });
+  // drop any now-empty markdown image wrapper left behind, e.g. ![alt]()
+  text = text.replace(/!\[[^\]]*\]\(\s*\)/g, '').trim();
+  return { text, attachments };
+}
+
 export function reviveMessages(messages: PersistedChatState['messages']): ChatMessage[] {
   return (messages ?? [])
     .filter((message) => message.status !== 'running')
-    .map((message) => ({
-      ...message,
-      createdAt: new Date(message.createdAt),
-    }));
+    .map((message) => {
+      const revived: ChatMessage = { ...message, createdAt: new Date(message.createdAt) };
+      // Defensive: an older persisted message may carry a base64 image inside
+      // its text content with no attachment meta — lift it so it renders as a
+      // small image, not a giant base64 string.
+      if (!revived.attachments?.length && revived.content) {
+        const { text, attachments } = extractInlineImages(revived.content);
+        if (attachments.length > 0) return { ...revived, content: text, attachments };
+      }
+      return revived;
+    });
 }
 
 export function reviveMeshEvents(events: PersistedChatState['meshEvents']): MeshEvent[] {

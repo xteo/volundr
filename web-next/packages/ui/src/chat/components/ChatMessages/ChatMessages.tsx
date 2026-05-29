@@ -77,13 +77,31 @@ export function UserMessage({ message }: UserMessageProps) {
         </div>
         {message.attachments && message.attachments.length > 0 && (
           <div className="niuu-chat-attachment-row">
-            {message.attachments.map((att, i) => (
-              <span key={`${att.name}-${i}`} className="niuu-chat-attachment-badge">
-                <Paperclip className="niuu-chat-attachment-icon" />
-                <span>{att.name}</span>
-                <span className="niuu-chat-attachment-size">{formatFileSize(att.size)}</span>
-              </span>
-            ))}
+            {message.attachments.map((att, i) =>
+              att.previewUrl ? (
+                <img
+                  key={`${att.name}-${i}`}
+                  src={att.previewUrl}
+                  alt={att.name}
+                  className="niuu-chat-attachment-badge"
+                  style={{
+                    maxHeight: 96,
+                    maxWidth: 160,
+                    height: 'auto',
+                    width: 'auto',
+                    borderRadius: 8,
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              ) : (
+                <span key={`${att.name}-${i}`} className="niuu-chat-attachment-badge">
+                  <Paperclip className="niuu-chat-attachment-icon" />
+                  <span>{att.name}</span>
+                  <span className="niuu-chat-attachment-size">{formatFileSize(att.size)}</span>
+                </span>
+              ),
+            )}
           </div>
         )}
       </div>
