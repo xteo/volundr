@@ -4,13 +4,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useService } from '@niuulabs/plugin-sdk';
 import { LoadingState, ErrorState, EmptyState, StateDot, relTime, cn } from '@niuulabs/ui';
 import type { DotState } from '@niuulabs/ui';
-import { Clock3, FolderGit2, Search, SquareTerminal, Ticket } from 'lucide-react';
+import { ChevronRight, Search, SquareTerminal, Ticket } from 'lucide-react';
 import { LaunchWizard } from './LaunchWizard';
 import { useSessionList } from './hooks/useSessionStore';
 import { groupByState } from './sessions/groupByState';
 import { LiveSessionDetailPage } from './LiveSessionDetailPage';
 import type { Session, SessionState } from '../domain/session';
 import type { IVolundrService } from '../ports/IVolundrService';
+import './scrollbar-themed.css';
 
 // ---------------------------------------------------------------------------
 // Pod group definitions — maps display labels to session states
@@ -70,8 +71,13 @@ function compactSourceParts(value: string): { label: string; branch?: string } {
   return { label: shortenRepoLabel(value) };
 }
 
+/** Collapse a leading "/home/<user>/" (incl. literal "/home/thor/") to "~/". */
+function homeToTilde(value: string): string {
+  return value.replace(/^\/home\/[^/]+\//, '~/');
+}
+
 function shortenRepoLabel(value: string): string {
-  if (value.startsWith('~/') || value.startsWith('/')) return value;
+  if (value.startsWith('~/') || value.startsWith('/')) return homeToTilde(value);
   const trimmed = value.replace(/\/+$/, '');
   const slug = trimmed.split('/').pop() ?? trimmed;
   return slug.replace(/\.git$/, '') || value;
@@ -97,7 +103,7 @@ function repoGroupLabel(session: Session): string {
     return compactSourceParts(session.preview).label;
   }
   if (session.personaName.startsWith('~/') || session.personaName.startsWith('/')) {
-    return session.personaName;
+    return homeToTilde(session.personaName);
   }
   return 'other';
 }
@@ -157,25 +163,32 @@ function PodEntry({
   selected,
   onSelect,
   collapsed = false,
+  index = 0,
 }: {
   session: Session;
   selected: boolean;
   onSelect: () => void;
   collapsed?: boolean;
+  /** Row position within its group — drives the zebra striping. */
+  index?: number;
 }) {
   const ageLabel = relTime(new Date(session.lastActivityAt ?? session.startedAt).getTime());
-  const primaryLabel = session.personaName || session.id;
+  const primaryLabel = session.name || session.personaName || '(unnamed)';
   const trackerLabel = session.sagaId ?? session.runId ?? session.ravnId;
   const previewLabel = session.preview;
   const sourceParts =
     previewLabel && looksLikeRepoLabel(previewLabel) ? compactSourceParts(previewLabel) : null;
   const showPreviewFallback = previewLabel && !sourceParts;
   const forgeLabel = session.clusterName ?? session.clusterId;
+  // Zebra striping: subtle alternating background on even rows. Inline so it
+  // works without the prebuilt niuu-* utilities being recompiled in dev.
+  const zebraBg = selected ? undefined : index % 2 === 1 ? 'rgba(255,255,255,0.025)' : undefined;
   return (
     <button
       type="button"
       onClick={onSelect}
       data-testid={`pod-entry-${session.id}`}
+      style={zebraBg ? { backgroundColor: zebraBg } : undefined}
       className={cn(
         'niuu-flex niuu-w-full niuu-items-start niuu-gap-2 niuu-border-b niuu-border-l-2 niuu-px-3 niuu-py-1.5 niuu-text-left niuu-transition-colors',
         selected
@@ -187,8 +200,13 @@ function PodEntry({
       {collapsed ? null : (
         <>
           <div className="niuu-flex-1 niuu-min-w-0 niuu-flex niuu-flex-col niuu-gap-0.5">
-            <div className="niuu-font-mono niuu-text-[13px] niuu-font-medium niuu-text-text-primary niuu-truncate">
-              {primaryLabel}
+            <div className="niuu-flex niuu-min-w-0 niuu-items-baseline niuu-gap-2">
+              <span className="niuu-flex-1 niuu-min-w-0 niuu-font-mono niuu-text-[13px] niuu-font-medium niuu-text-text-primary niuu-truncate">
+                {primaryLabel}
+              </span>
+              <span className="niuu-flex-shrink-0 niuu-font-mono niuu-text-[10px] niuu-text-text-secondary">
+                {ageLabel}
+              </span>
             </div>
             <div className="niuu-flex niuu-min-w-0 niuu-flex-wrap niuu-items-center niuu-gap-x-2 niuu-gap-y-0.5 niuu-font-mono niuu-text-[10px] niuu-text-text-muted">
               {trackerLabel ? (
@@ -202,21 +220,17 @@ function PodEntry({
               ) : null}
               {forgeLabel ? (
                 <span
-                  className="niuu-inline-flex niuu-min-w-0 niuu-items-center niuu-gap-1.5 niuu-rounded-full niuu-border niuu-border-brand/20 niuu-bg-brand/10 niuu-px-2 niuu-py-0.5"
+                  className="niuu-inline-flex niuu-min-w-0 niuu-items-center niuu-rounded-full niuu-border niuu-border-brand/20 niuu-bg-brand/10 niuu-px-2 niuu-py-0.5"
                   title={forgeLabel}
                 >
-                  <span className="niuu-text-[9px] niuu-uppercase niuu-tracking-[0.14em] niuu-text-text-faint">
-                    forge
-                  </span>
                   <span className="niuu-truncate niuu-text-brand">{forgeLabel}</span>
                 </span>
               ) : null}
               {sourceParts ? (
                 <span
-                  className="niuu-flex niuu-min-w-0 niuu-items-center niuu-gap-1.5"
+                  className="niuu-flex niuu-min-w-0 niuu-items-center niuu-gap-1.5 niuu-text-text-secondary"
                   title={previewLabel}
                 >
-                  <FolderGit2 className="niuu-h-3 niuu-w-3 niuu-flex-shrink-0 niuu-text-text-faint" />
                   <span className="niuu-truncate">{sourceParts.label}</span>
                   {sourceParts.branch ? (
                     <span className="niuu-flex-shrink-0 niuu-text-brand">
@@ -234,10 +248,6 @@ function PodEntry({
                   <span className="niuu-truncate">{previewLabel}</span>
                 </span>
               ) : null}
-              <span className="niuu-flex niuu-flex-shrink-0 niuu-items-center niuu-gap-1.5">
-                <Clock3 className="niuu-h-3 niuu-w-3 niuu-flex-shrink-0 niuu-text-text-faint" />
-                <span>{ageLabel}</span>
-              </span>
             </div>
           </div>
         </>
@@ -256,37 +266,60 @@ function PodGroup({
   selectedId,
   onSelect,
   collapsed = false,
+  folded = false,
+  onToggleFold,
 }: {
   label: string;
   sessions: Session[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   collapsed?: boolean;
+  /** Whether the group's session rows are folded away (header still shown). */
+  folded?: boolean;
+  /** Toggles the folded state. When absent, the header is not interactive. */
+  onToggleFold?: () => void;
 }) {
   if (sessions.length === 0) return null;
 
   return (
     <div data-testid={`pod-group-${toGroupTestId(label)}`}>
       {!collapsed && (
-        <div className="niuu-flex niuu-items-center niuu-justify-between niuu-border-b niuu-border-white/6 niuu-px-4 niuu-py-2 niuu-text-[10px] niuu-font-semibold niuu-uppercase niuu-tracking-[0.18em] niuu-text-text-muted">
-          <span>{label}</span>
+        <button
+          type="button"
+          onClick={onToggleFold}
+          disabled={!onToggleFold}
+          aria-expanded={!folded}
+          data-testid={`pod-group-${toGroupTestId(label)}-header`}
+          className={cn(
+            'niuu-flex niuu-w-full niuu-items-center niuu-gap-1.5 niuu-border-b niuu-border-white/6 niuu-px-2.5 niuu-py-2 niuu-text-left niuu-text-[10px] niuu-font-semibold niuu-uppercase niuu-tracking-[0.18em] niuu-text-text-muted niuu-transition-colors',
+            onToggleFold && 'hover:niuu-text-text-primary',
+          )}
+        >
+          <ChevronRight
+            className="niuu-h-3 niuu-w-3 niuu-flex-shrink-0 niuu-text-text-faint niuu-transition-transform"
+            style={{ transform: folded ? 'rotate(0deg)' : 'rotate(90deg)' }}
+            aria-hidden="true"
+          />
+          <span className="niuu-flex-1 niuu-truncate">{label}</span>
           <span
             className="niuu-font-mono niuu-text-text-faint"
             data-testid={`pod-group-${toGroupTestId(label)}-count`}
           >
             {sessions.length}
           </span>
-        </div>
+        </button>
       )}
-      {sessions.map((s) => (
-        <PodEntry
-          key={s.id}
-          session={s}
-          selected={s.id === selectedId}
-          onSelect={() => onSelect(s.id)}
-          collapsed={collapsed}
-        />
-      ))}
+      {!folded &&
+        sessions.map((s, i) => (
+          <PodEntry
+            key={s.id}
+            session={s}
+            selected={s.id === selectedId}
+            onSelect={() => onSelect(s.id)}
+            collapsed={collapsed}
+            index={i}
+          />
+        ))}
     </div>
   );
 }
@@ -306,6 +339,32 @@ function readLeftWidth(): number {
   return Number.isFinite(v) && v >= LEFT_MIN_PX && v <= LEFT_MAX_PX ? v : LEFT_DEFAULT_PX;
 }
 
+// lexi/ux-update: foldable groups + hide-archived, persisted in localStorage.
+const FOLDED_GROUPS_KEY = 'niuu.lexiUx.sessions.foldedGroups';
+const HIDE_ARCHIVED_KEY = 'niuu.lexiUx.sessions.hideArchived';
+/** Groups folded away by default on first load. */
+const DEFAULT_FOLDED_GROUPS = ['ARCHIVED', 'STOPPED'];
+
+function readFoldedGroups(): Record<string, boolean> {
+  const seed = Object.fromEntries(DEFAULT_FOLDED_GROUPS.map((g) => [g, true]));
+  if (typeof window === 'undefined') return seed;
+  try {
+    const raw = window.localStorage.getItem(FOLDED_GROUPS_KEY);
+    if (!raw) return seed;
+    const parsed = JSON.parse(raw) as Record<string, boolean>;
+    return parsed && typeof parsed === 'object' ? parsed : seed;
+  } catch {
+    return seed;
+  }
+}
+
+function readHideArchived(): boolean {
+  if (typeof window === 'undefined') return true;
+  const raw = window.localStorage.getItem(HIDE_ARCHIVED_KEY);
+  // Default = hide archived. Only an explicit "0" reveals them.
+  return raw === null ? true : raw !== '0';
+}
+
 export function SessionsPage() {
   const navigate = useNavigate();
   const { sessionId: routeSessionId } = useParams({ strict: false });
@@ -317,6 +376,8 @@ export function SessionsPage() {
   const [launchOpen, setLaunchOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readLeftWidth);
   const [resizing, setResizing] = useState(false);
+  const [foldedGroups, setFoldedGroups] = useState<Record<string, boolean>>(readFoldedGroups);
+  const [hideArchived, setHideArchived] = useState<boolean>(readHideArchived);
   useEffect(() => {
     try {
       window.localStorage.setItem(LEFT_WIDTH_KEY, String(sidebarWidth));
@@ -324,6 +385,23 @@ export function SessionsPage() {
       /* localStorage unavailable — non-fatal */
     }
   }, [sidebarWidth]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FOLDED_GROUPS_KEY, JSON.stringify(foldedGroups));
+    } catch {
+      /* localStorage unavailable — non-fatal */
+    }
+  }, [foldedGroups]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HIDE_ARCHIVED_KEY, hideArchived ? '1' : '0');
+    } catch {
+      /* localStorage unavailable — non-fatal */
+    }
+  }, [hideArchived]);
+  const toggleGroupFold = (label: string) => {
+    setFoldedGroups((prev) => ({ ...prev, [label]: !prev[label] }));
+  };
   const startSidebarResize = (e: ReactMouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -362,6 +440,7 @@ export function SessionsPage() {
     return allSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
+        s.name?.toLowerCase().includes(q) ||
         s.personaName.toLowerCase().includes(q) ||
         s.preview?.toLowerCase().includes(q) ||
         s.clusterName?.toLowerCase().includes(q) ||
@@ -372,7 +451,9 @@ export function SessionsPage() {
   // Group by state
   const grouped = useMemo(() => groupByState(filteredSessions), [filteredSessions]);
 
-  // Build sidebar groups — flatten matching states per display group
+  // Build sidebar groups — flatten matching states per display group.
+  // When hideArchived is on (and we're grouping by state) the ARCHIVED group
+  // is dropped entirely.
   const sidebarGroups = useMemo<SessionSection[]>(() => {
     if (sidebarMode === 'repo') {
       return groupByRepo(filteredSessions);
@@ -380,11 +461,17 @@ export function SessionsPage() {
     if (sidebarMode === 'forge') {
       return groupByForge(filteredSessions);
     }
-    return POD_GROUPS.map((g) => ({
+    return POD_GROUPS.filter((g) => !(hideArchived && g.label === 'ARCHIVED')).map((g) => ({
       label: g.label,
       sessions: g.states.flatMap((st) => grouped[st]),
     }));
-  }, [filteredSessions, grouped, sidebarMode]);
+  }, [filteredSessions, grouped, sidebarMode, hideArchived]);
+
+  // True when there are any archived sessions to reveal/hide.
+  const archivedCount = useMemo(
+    () => allSessions.filter((s) => s.state === 'archived').length,
+    [allSessions],
+  );
 
   // Auto-select first running session on load
   useEffect(() => {
@@ -476,7 +563,7 @@ export function SessionsPage() {
                   ›
                 </button>
               </div>
-              <div className="niuu-flex-1 niuu-overflow-y-auto niuu-py-2">
+              <div className="niuu-flex-1 niuu-min-h-0 niuu-overflow-y-auto niuu-py-2 niuu-scroll-themed">
                 {sidebarGroups.map((g) => (
                   <PodGroup
                     key={g.label}
@@ -543,6 +630,23 @@ export function SessionsPage() {
                     );
                   })}
                 </div>
+                {sidebarMode === 'state' && archivedCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setHideArchived((v) => !v)}
+                    className={cn(
+                      'niuu-ml-auto niuu-rounded-md niuu-border niuu-border-border-subtle niuu-px-2 niuu-py-1 niuu-font-mono niuu-text-[10px] niuu-transition-colors',
+                      hideArchived
+                        ? 'niuu-text-text-muted hover:niuu-text-text-primary'
+                        : 'niuu-bg-brand/15 niuu-text-brand',
+                    )}
+                    data-testid="pod-toggle-archived"
+                    aria-pressed={!hideArchived}
+                    title={hideArchived ? 'Show archived sessions' : 'Hide archived sessions'}
+                  >
+                    {hideArchived ? `show archived (${archivedCount})` : 'hide archived'}
+                  </button>
+                ) : null}
               </div>
 
               <div className="niuu-px-2.5 niuu-pb-1">
@@ -592,7 +696,7 @@ export function SessionsPage() {
                 </div>
               )}
 
-              <div className="niuu-flex-1 niuu-overflow-y-auto niuu-pb-1.5">
+              <div className="niuu-flex-1 niuu-min-h-0 niuu-overflow-y-auto niuu-pb-1.5 niuu-scroll-themed">
                 {sidebarGroups.map((g) => (
                   <PodGroup
                     key={g.label}
@@ -600,6 +704,8 @@ export function SessionsPage() {
                     sessions={g.sessions}
                     selectedId={selectedSessionId}
                     onSelect={handleSelectSession}
+                    folded={Boolean(foldedGroups[g.label])}
+                    onToggleFold={() => toggleGroupFold(g.label)}
                   />
                 ))}
               </div>

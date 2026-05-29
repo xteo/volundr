@@ -664,6 +664,7 @@ function toDomainSession(session: VolundrSession): Session {
   return {
     id: session.id,
     ravnId: toSessionRavnId(session),
+    name: session.name,
     personaName: session.name,
     templateId: toSessionTemplateId(session),
     clusterId: toSessionClusterId(session),

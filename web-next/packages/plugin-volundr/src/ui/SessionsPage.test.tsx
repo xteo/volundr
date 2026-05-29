@@ -140,6 +140,13 @@ function createSessionStoreWithSessions(sessions: Session[]): ISessionStore {
 describe('SessionsPage', () => {
   beforeEach(() => {
     navigate.mockClear();
+    // lexi/ux-update: reset persisted UX prefs (folded groups, hide-archived)
+    // so default-collapse / default-hide behavior is deterministic per test.
+    try {
+      window.localStorage.clear();
+    } catch {
+      /* localStorage unavailable — non-fatal */
+    }
   });
 
   it('renders the sessions page container', () => {
@@ -189,13 +196,20 @@ describe('SessionsPage', () => {
     await waitFor(() => expect(screen.getByTestId('pod-group-error')).toBeInTheDocument());
   });
 
-  it('renders ARCHIVED group when archived sessions are present', async () => {
+  it('renders ARCHIVED group when archived sessions are revealed', async () => {
     const store = createSessionStoreWithSessions([
       makeSession({ id: 'arch-1', personaName: 'archiver', state: 'archived' }),
     ]);
     wrap(store);
+    // Archived is hidden by default — reveal it via the header toggle.
+    await waitFor(() => expect(screen.getByTestId('pod-toggle-archived')).toBeInTheDocument());
+    expect(screen.queryByTestId('pod-group-archived')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('pod-toggle-archived'));
     await waitFor(() => expect(screen.getByTestId('pod-group-archived')).toBeInTheDocument());
-    expect(screen.getByTestId('pod-entry-arch-1')).toBeInTheDocument();
+    // The ARCHIVED group is folded by default — expand it to see its rows.
+    expect(screen.queryByTestId('pod-entry-arch-1')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('pod-group-archived-header'));
+    await waitFor(() => expect(screen.getByTestId('pod-entry-arch-1')).toBeInTheDocument());
   });
 
   it('renders pod entries for running sessions', async () => {

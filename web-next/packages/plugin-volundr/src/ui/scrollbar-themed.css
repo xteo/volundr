@@ -1,0 +1,30 @@
+/* ── Themed scrollbar ──────────────────────────────────────────────
+ * Reusable brand/ink-blue scrollbar matching the conversation panel
+ * (see SessionChat.css .niuu-chat-messages-container). Thin width,
+ * transparent track, brand-tinted rounded thumb, subtle hover brighten.
+ * Apply to any bounded overflow container (e.g. the session list). */
+
+.niuu-scroll-themed {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-brand) 35%, var(--color-bg-elevated)) transparent;
+}
+
+.niuu-scroll-themed::-webkit-scrollbar {
+  width: 8px;
+}
+
+.niuu-scroll-themed::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.niuu-scroll-themed::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-brand) 28%, var(--color-bg-elevated));
+  background-clip: padding-box;
+}
+
+.niuu-scroll-themed::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-brand) 42%, var(--color-bg-elevated));
+  background-clip: padding-box;
+}
