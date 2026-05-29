@@ -1,12 +1,16 @@
 import { createElement } from 'react';
 import { createRoute } from '@tanstack/react-router';
-import { bifrostPlugin } from '@niuulabs/plugin-bifrost/plugin';
 import { loginPlugin } from '@niuulabs/plugin-login';
-import { ravnPlugin } from '@niuulabs/plugin-ravn';
-import { mimirPlugin } from '@niuulabs/plugin-mimir';
-import { observatoryPlugin } from '@niuulabs/plugin-observatory';
-import { tingPlugin } from '@niuulabs/plugin-ting';
 import { volundrPlugin } from '@niuulabs/plugin-volundr';
+// lexi/ux-update: non-Forge modules are disabled initially — keeps the left
+// rail focused on Forge/Volundr AND avoids compiling these heavy packages in
+// the dev preview (big load-time win). Re-enable an import here + its entry in
+// the `plugins` array below to restore a module.
+// import { bifrostPlugin } from '@niuulabs/plugin-bifrost/plugin';
+// import { ravnPlugin } from '@niuulabs/plugin-ravn';
+// import { mimirPlugin } from '@niuulabs/plugin-mimir';
+// import { observatoryPlugin } from '@niuulabs/plugin-observatory';
+// import { tingPlugin } from '@niuulabs/plugin-ting';
 import { definePlugin, type PluginDescriptor } from '@niuulabs/plugin-sdk';
 import { GuildPage } from './GuildPage';
 import { SettingsPage } from './SettingsPage';
@@ -83,12 +87,9 @@ const settingsPlugin = definePlugin({
 
 export const plugins: PluginDescriptor[] = [
   loginPlugin,
-  bifrostPlugin,
   volundrPlugin,
-  tingPlugin,
-  mimirPlugin,
-  ravnPlugin,
-  observatoryPlugin,
   guildPlugin,
   settingsPlugin,
+  // lexi/ux-update: disabled initially — re-enable here + uncomment the import:
+  // bifrostPlugin, tingPlugin, mimirPlugin, ravnPlugin, observatoryPlugin,
 ];
