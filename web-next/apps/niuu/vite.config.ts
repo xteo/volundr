@@ -137,5 +137,19 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // lexi/ux-update live preview: bind all interfaces so the dev server is
+    // reachable over Tailscale, and proxy API/SSE/WS to the live niuu backend
+    // on :8080 so the preview shows real Forge data.
+    host: true,
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/config.json': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/health': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/healthz': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/mcp': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/mimir': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/audit': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/s': { target: 'http://127.0.0.1:8080', changeOrigin: true, ws: true },
+    },
   },
 });
