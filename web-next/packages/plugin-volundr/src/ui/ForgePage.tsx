@@ -221,7 +221,9 @@ function InflightRow({
           pulse={!isBooting && session.state === 'running'}
         />
         <div className="vol-forge__inflight-namecol">
-          <div className="vol-forge__inflight-name">{session.id}</div>
+          <div className="vol-forge__inflight-name" title={session.id}>
+            {session.name || session.personaName || session.id}
+          </div>
           <div className="vol-forge__inflight-sub">
             <span>{session.personaName}</span>
             <span className="vol-forge__sep">·</span>
@@ -358,7 +360,9 @@ function RecentFleetItem({ session }: { session: Session }) {
     <li className="vol-forge__tail-row">
       <span className="vol-forge__tail-time">{compactAge(lastTouched(session))}</span>
       <StateDot state={sessionDotState(session)} />
-      <span className="vol-forge__tail-name">{session.id}</span>
+      <span className="vol-forge__tail-name" title={session.id}>
+        {session.name || session.personaName || session.id}
+      </span>
       <span className="vol-forge__tail-sep">·</span>
       <span className="vol-forge__tail-preview" title={statusLabel(session)}>
         {statusLabel(session)}
