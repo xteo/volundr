@@ -152,7 +152,9 @@ export default defineConfig({
       '/mcp': { target: 'http://127.0.0.1:8080', changeOrigin: true },
       '/mimir': { target: 'http://127.0.0.1:8080', changeOrigin: true },
       '/audit': { target: 'http://127.0.0.1:8080', changeOrigin: true },
-      '/s': { target: 'http://127.0.0.1:8080', changeOrigin: true, ws: true },
+      // NB: trailing slash is required — a bare '/s' prefix-matches '/src/*'
+      // (vite's own modules) and breaks the app. Skuld routes are '/s/{id}/…'.
+      '/s/': { target: 'http://127.0.0.1:8080', changeOrigin: true, ws: true },
     },
   },
 });
