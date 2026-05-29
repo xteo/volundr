@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { useService } from '@niuulabs/plugin-sdk';
@@ -295,6 +295,17 @@ function PodGroup({
 // SessionsPage — master-detail layout
 // ---------------------------------------------------------------------------
 
+// lexi/ux-update: configurable (drag-resizable) left session column, persisted.
+const LEFT_WIDTH_KEY = 'niuu.lexiUx.sessions.leftWidth';
+const LEFT_MIN_PX = 200;
+const LEFT_MAX_PX = 560;
+const LEFT_DEFAULT_PX = 300;
+function readLeftWidth(): number {
+  if (typeof window === 'undefined') return LEFT_DEFAULT_PX;
+  const v = Number(window.localStorage.getItem(LEFT_WIDTH_KEY));
+  return Number.isFinite(v) && v >= LEFT_MIN_PX && v <= LEFT_MAX_PX ? v : LEFT_DEFAULT_PX;
+}
+
 export function SessionsPage() {
   const navigate = useNavigate();
   const { sessionId: routeSessionId } = useParams({ strict: false });
@@ -304,6 +315,36 @@ export function SessionsPage() {
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>('state');
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [launchOpen, setLaunchOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(readLeftWidth);
+  const [resizing, setResizing] = useState(false);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LEFT_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      /* localStorage unavailable — non-fatal */
+    }
+  }, [sidebarWidth]);
+  const startSidebarResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    setResizing(true);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(LEFT_MAX_PX, Math.max(LEFT_MIN_PX, startWidth + (ev.clientX - startX)));
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
   const volundr = useService<IVolundrService>('volundr');
   const queryClient = useQueryClient();
 
@@ -401,7 +442,8 @@ export function SessionsPage() {
         {/* ── Left sidebar: pod list ─────────────────────────────── */}
         <nav
           className={cn(
-            'niuu-relative niuu-shrink-0 niuu-overflow-hidden niuu-bg-[#0b0c10] niuu-transition-[width] niuu-duration-200',
+            'niuu-relative niuu-shrink-0 niuu-overflow-hidden niuu-bg-[#0b0c10]',
+            !resizing && 'niuu-transition-[width] niuu-duration-200',
           )}
           style={
             sidebarCollapsed
@@ -412,10 +454,10 @@ export function SessionsPage() {
                   flexBasis: '48px',
                 }
               : {
-                  width: '228px',
-                  minWidth: '228px',
-                  maxWidth: '228px',
-                  flexBasis: '228px',
+                  width: `${sidebarWidth}px`,
+                  minWidth: `${sidebarWidth}px`,
+                  maxWidth: `${sidebarWidth}px`,
+                  flexBasis: `${sidebarWidth}px`,
                 }
           }
           aria-label="Session list"
@@ -565,12 +607,17 @@ export function SessionsPage() {
           )}
         </nav>
 
-        {/* ── Main content: session detail ───────────────────────── */}
+        {/* ── Resizable divider: drag to set the left column width ── */}
         <div
-          aria-hidden="true"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize session list"
+          onMouseDown={sidebarCollapsed ? undefined : startSidebarResize}
           className="niuu-h-full niuu-flex-shrink-0"
           style={{
-            width: '3px',
+            width: sidebarCollapsed ? '3px' : '6px',
+            cursor: sidebarCollapsed ? 'default' : 'col-resize',
+            userSelect: 'none',
             background:
               'linear-gradient(to right, rgba(255,255,255,0.12), rgba(255,255,255,0.30), rgba(255,255,255,0.12))',
           }}
