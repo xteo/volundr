@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useService } from '@niuulabs/plugin-sdk';
 import { LoadingState, ErrorState, EmptyState, StateDot, relTime, cn } from '@niuulabs/ui';
 import type { DotState } from '@niuulabs/ui';
-import { ChevronRight, Search, SquareTerminal, Ticket } from 'lucide-react';
+import { Archive, ChevronRight, Search, Square, SquareTerminal, Ticket } from 'lucide-react';
 import { LaunchWizard } from './LaunchWizard';
 import { useSessionList } from './hooks/useSessionStore';
 import { groupByState } from './sessions/groupByState';
@@ -13,6 +13,7 @@ import { getShowDebugMeta } from './uxPrefs';
 import type { Session, SessionState } from '../domain/session';
 import type { IVolundrService } from '../ports/IVolundrService';
 import './scrollbar-themed.css';
+import './session-card.css';
 
 // ---------------------------------------------------------------------------
 // Pod group definitions — maps display labels to session states
@@ -159,20 +160,41 @@ function groupByForge(sessions: Session[]): SessionSection[] {
 // PodEntry — a single session row in the sidebar
 // ---------------------------------------------------------------------------
 
+/** States from which a session can still be stopped. */
+const STOPPABLE_STATES: SessionState[] = [
+  'running',
+  'idle',
+  'provisioning',
+  'requested',
+  'ready',
+  'terminating',
+];
+
 function PodEntry({
   session,
   selected,
   onSelect,
+  onStop,
+  onArchive,
+  busy = false,
   collapsed = false,
   index = 0,
 }: {
   session: Session;
   selected: boolean;
   onSelect: () => void;
+  /** Stop the session in place (hover action). */
+  onStop?: (id: string) => void;
+  /** Stop (if running) then archive the session (hover action). */
+  onArchive?: (id: string) => void;
+  /** True while this row has an action in flight — disables its buttons. */
+  busy?: boolean;
   collapsed?: boolean;
   /** Row position within its group — drives the zebra striping. */
   index?: number;
 }) {
+  const canStop = STOPPABLE_STATES.includes(session.state);
+  const canArchive = session.state !== 'archived';
   const ageLabel = relTime(new Date(session.lastActivityAt ?? session.startedAt).getTime());
   const primaryLabel = session.name || session.personaName || '(unnamed)';
   // saga/run/ravn id and forge/cluster id are platform plumbing. ravnId in
@@ -192,16 +214,24 @@ function PodEntry({
   // works without the prebuilt niuu-* utilities being recompiled in dev.
   const zebraBg = selected ? undefined : index % 2 === 1 ? 'rgba(255,255,255,0.025)' : undefined;
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       data-testid={`pod-entry-${session.id}`}
-      style={zebraBg ? { backgroundColor: zebraBg } : undefined}
+      aria-pressed={selected}
+      style={selected ? undefined : zebraBg ? { backgroundColor: zebraBg } : undefined}
       className={cn(
-        'niuu-flex niuu-w-full niuu-items-start niuu-gap-2 niuu-border-b niuu-border-l-2 niuu-px-3 niuu-py-1.5 niuu-text-left niuu-transition-colors',
+        'lx-pod-entry niuu-flex niuu-w-full niuu-items-start niuu-gap-2 niuu-border-b niuu-border-l-2 niuu-px-3 niuu-py-1.5 niuu-text-left niuu-transition-colors',
         selected
-          ? 'niuu-border-brand niuu-border-b-white/10 niuu-bg-[#12212b] niuu-shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]'
-          : 'niuu-border-transparent niuu-border-b-white/6 hover:niuu-bg-bg-tertiary',
+          ? 'lx-pod-entry--selected niuu-border-brand niuu-border-b-white/10'
+          : 'niuu-border-transparent niuu-border-b-white/6',
       )}
     >
       <StateDot state={SESSION_DOT[session.state]} pulse={session.state === 'running'} />
@@ -258,9 +288,45 @@ function PodEntry({
               ) : null}
             </div>
           </div>
+          {(canStop && onStop) || (canArchive && onArchive) ? (
+            <div className="lx-pod-actions" onClick={(e) => e.stopPropagation()}>
+              {canStop && onStop ? (
+                <button
+                  type="button"
+                  className="lx-pod-action-btn lx-pod-action-btn--stop"
+                  title="Stop session"
+                  aria-label={`Stop session ${primaryLabel}`}
+                  data-testid={`pod-entry-${session.id}-stop`}
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStop(session.id);
+                  }}
+                >
+                  <Square className="niuu-h-3.5 niuu-w-3.5" fill="currentColor" />
+                </button>
+              ) : null}
+              {canArchive && onArchive ? (
+                <button
+                  type="button"
+                  className="lx-pod-action-btn lx-pod-action-btn--archive"
+                  title="Stop & archive session"
+                  aria-label={`Stop and archive session ${primaryLabel}`}
+                  data-testid={`pod-entry-${session.id}-archive`}
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onArchive(session.id);
+                  }}
+                >
+                  <Archive className="niuu-h-3.5 niuu-w-3.5" />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -273,6 +339,9 @@ function PodGroup({
   sessions,
   selectedId,
   onSelect,
+  onStop,
+  onArchive,
+  busyId,
   collapsed = false,
   folded = false,
   onToggleFold,
@@ -281,6 +350,10 @@ function PodGroup({
   sessions: Session[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onStop?: (id: string) => void;
+  onArchive?: (id: string) => void;
+  /** Id of the session whose row action is currently in flight. */
+  busyId?: string | null;
   collapsed?: boolean;
   /** Whether the group's session rows are folded away (header still shown). */
   folded?: boolean;
@@ -324,6 +397,9 @@ function PodGroup({
             session={s}
             selected={s.id === selectedId}
             onSelect={() => onSelect(s.id)}
+            onStop={onStop}
+            onArchive={onArchive}
+            busy={busyId === s.id}
             collapsed={collapsed}
             index={i}
           />
@@ -381,6 +457,7 @@ export function SessionsPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>('state');
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readLeftWidth);
   const [resizing, setResizing] = useState(false);
@@ -521,13 +598,46 @@ export function SessionsPage() {
     setArchiveBusy(true);
     try {
       await volundr.archiveStoppedSessions();
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['volundr', 'domain-sessions'] }),
-        queryClient.invalidateQueries({ queryKey: ['volundr', 'history'] }),
-      ]);
-      await sessionsQuery.refetch();
+      await refreshSessions();
     } finally {
       setArchiveBusy(false);
+    }
+  }
+
+  async function refreshSessions() {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['volundr', 'domain-sessions'] }),
+      queryClient.invalidateQueries({ queryKey: ['volundr', 'history'] }),
+    ]);
+    await sessionsQuery.refetch();
+  }
+
+  // Hover action: stop a session in place.
+  async function handleStopSession(id: string) {
+    if (rowBusy) return;
+    setRowBusy(id);
+    try {
+      await volundr.stopSession(id);
+      await refreshSessions();
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
+  // Hover action: "archive" == stop (if still active) then archive.
+  async function handleArchiveSession(id: string) {
+    if (rowBusy) return;
+    setRowBusy(id);
+    try {
+      const target = allSessions.find((s) => s.id === id);
+      if (target && STOPPABLE_STATES.includes(target.state)) {
+        // Stop first; ignore a stop error so a flaky stop still lets us archive.
+        await volundr.stopSession(id).catch(() => undefined);
+      }
+      await volundr.archiveSession(id);
+      await refreshSessions();
+    } finally {
+      setRowBusy(null);
     }
   }
 
@@ -712,6 +822,9 @@ export function SessionsPage() {
                     sessions={g.sessions}
                     selectedId={selectedSessionId}
                     onSelect={handleSelectSession}
+                    onStop={handleStopSession}
+                    onArchive={handleArchiveSession}
+                    busyId={rowBusy}
                     folded={Boolean(foldedGroups[g.label])}
                     onToggleFold={() => toggleGroupFold(g.label)}
                   />
