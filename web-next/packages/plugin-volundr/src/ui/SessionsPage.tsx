@@ -175,14 +175,19 @@ function PodEntry({
 }) {
   const ageLabel = relTime(new Date(session.lastActivityAt ?? session.startedAt).getTime());
   const primaryLabel = session.name || session.personaName || '(unnamed)';
-  const trackerLabel = session.sagaId ?? session.runId ?? session.ravnId;
+  // saga/run/ravn id and forge/cluster id are platform plumbing. ravnId in
+  // particular falls back to the owner id ("dev-user") when there is no real
+  // tracker, so it renders as a meaningless "ticket". Hide both unless the
+  // operator opts into debug metadata. See uxPrefs.getShowDebugMeta.
+  const showDebugMeta = getShowDebugMeta();
+  const trackerLabel = showDebugMeta
+    ? (session.sagaId ?? session.runId ?? session.ravnId)
+    : undefined;
   const previewLabel = session.preview;
   const sourceParts =
     previewLabel && looksLikeRepoLabel(previewLabel) ? compactSourceParts(previewLabel) : null;
   const showPreviewFallback = previewLabel && !sourceParts;
-  // Forge/cluster id is platform plumbing — hidden unless the operator opts into
-  // debug metadata. See uxPrefs.getShowDebugMeta.
-  const forgeLabel = getShowDebugMeta() ? (session.clusterName ?? session.clusterId) : undefined;
+  const forgeLabel = showDebugMeta ? (session.clusterName ?? session.clusterId) : undefined;
   // Zebra striping: subtle alternating background on even rows. Inline so it
   // works without the prebuilt niuu-* utilities being recompiled in dev.
   const zebraBg = selected ? undefined : index % 2 === 1 ? 'rgba(255,255,255,0.025)' : undefined;
