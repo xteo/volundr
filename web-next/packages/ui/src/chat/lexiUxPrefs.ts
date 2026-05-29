@@ -15,12 +15,19 @@ export interface LexiUxChatPrefs {
   copyMode: 'hover' | 'inline';
 }
 
+/** Codex-style conversation fold: question → "Worked" disclosure → answer. */
+export type ConversationView = 'compact' | 'expanded';
+
 const DEFAULTS: LexiUxChatPrefs = {
   showMessageActions: false,
   showAgentAvatar: false,
   timestamp: 'hover',
   copyMode: 'hover',
 };
+
+const CONVERSATION_VIEW_KEY = 'conversationView';
+const CONVERSATION_VIEW_DEFAULT: ConversationView = 'compact';
+const CONVERSATION_VIEW_VALUES = ['compact', 'expanded'] as const;
 
 function readBool(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') return fallback;
@@ -49,4 +56,19 @@ export function getLexiUxChatPrefs(): LexiUxChatPrefs {
     timestamp: readEnum('timestamp', ['hover', 'always', 'never'] as const, DEFAULTS.timestamp),
     copyMode: readEnum('copyMode', ['hover', 'inline'] as const, DEFAULTS.copyMode),
   };
+}
+
+/** Read the persisted conversation-fold view (defaults to "compact"). */
+export function getConversationView(): ConversationView {
+  return readEnum(CONVERSATION_VIEW_KEY, CONVERSATION_VIEW_VALUES, CONVERSATION_VIEW_DEFAULT);
+}
+
+/** Persist the conversation-fold view to localStorage. */
+export function setConversationView(view: ConversationView): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`niuu.lexiUx.${CONVERSATION_VIEW_KEY}`, view);
+  } catch {
+    // localStorage may not be available
+  }
 }

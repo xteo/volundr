@@ -8,6 +8,10 @@ import {
   Eye,
   EyeOff,
   Trash2Icon,
+  ListCollapse,
+  ChevronRight,
+  ChevronDown,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '../../../utils/cn';
 import { useRoomState } from '../../hooks/useRoomState';
@@ -35,6 +39,7 @@ import type {
 } from '../../types';
 import type { FileAttachment } from '../../hooks/useFileAttachments';
 import type { SlashCommand } from '../../utils/slashCommands';
+import { getConversationView, setConversationView, type ConversationView } from '../../lexiUxPrefs';
 import './SessionChat.css';
 
 const SCROLL_THRESHOLD = 150;
@@ -243,6 +248,30 @@ export function SessionChat({
   );
   const [peerSidebarCollapsed, setPeerSidebarCollapsed] = useState(false);
   const [cascadePanelCollapsed, setCascadePanelCollapsed] = useState(false);
+  const [conversationView, setConversationViewState] = useState<ConversationView>(() =>
+    getConversationView(),
+  );
+  const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleConversationView = useCallback(() => {
+    setConversationViewState((prev) => {
+      const next: ConversationView = prev === 'compact' ? 'expanded' : 'compact';
+      setConversationView(next);
+      return next;
+    });
+  }, []);
+
+  const toggleTurn = useCallback((turnId: string) => {
+    setExpandedTurns((prev) => {
+      const next = new Set(prev);
+      if (next.has(turnId)) {
+        next.delete(turnId);
+      } else {
+        next.add(turnId);
+      }
+      return next;
+    });
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -366,6 +395,85 @@ export function SessionChat({
     }
     return result;
   }, [visibleMessages, isRoomMode, showInternal]);
+
+  // ── Compact (Codex-style) turn folding ──
+  // A turn opens at a user message and runs until the next user message. We
+  // render: the user message, an optional "Worked" disclosure for any
+  // intermediary assistant/tool/system steps, and the final assistant reply.
+  // Folding is a pure view concern; it does not change what is fetched.
+  type ChatMsg = (typeof visibleMessages)[number];
+  type CompactTurn = {
+    id: string;
+    user: ChatMsg | null;
+    intermediaries: ChatMsg[];
+    final: ChatMsg | null;
+    leading: ChatMsg[];
+  };
+
+  const compactRenderable = renderedGroups.every((group) => group.type === 'single');
+
+  const compactTurns = useMemo((): CompactTurn[] => {
+    const turns: CompactTurn[] = [];
+    // Messages before the first user message (e.g. a resumed session opening
+    // with assistant output) are rendered as-is, ahead of the first turn.
+    const leadingPreamble: ChatMsg[] = [];
+    // While building a turn we keep every non-user message in `members`; on
+    // close we split off the last assistant message as the turn's answer.
+    let members: ChatMsg[] = [];
+    let currentUser: ChatMsg | null = null;
+    let sawUser = false;
+
+    const pushCurrent = () => {
+      if (!currentUser) return;
+      const intermediaries = [...members];
+      let finalMsg: ChatMsg | null = null;
+      for (let k = intermediaries.length - 1; k >= 0; k--) {
+        const candidate = intermediaries[k];
+        if (candidate && candidate.role === 'assistant') {
+          finalMsg = candidate;
+          intermediaries.splice(k, 1);
+          break;
+        }
+      }
+      turns.push({
+        id: `turn-${currentUser.id}`,
+        user: currentUser,
+        intermediaries,
+        final: finalMsg,
+        leading: [],
+      });
+      currentUser = null;
+      members = [];
+    };
+
+    for (const msg of visibleMessages) {
+      if (msg.role === 'user') {
+        pushCurrent();
+        sawUser = true;
+        currentUser = msg;
+        continue;
+      }
+      if (!sawUser) {
+        leadingPreamble.push(msg);
+        continue;
+      }
+      members.push(msg);
+    }
+    pushCurrent();
+
+    if (leadingPreamble.length > 0) {
+      turns.unshift({
+        id: 'turn-preamble',
+        user: null,
+        intermediaries: [],
+        final: null,
+        leading: leadingPreamble,
+      });
+    }
+    return turns;
+  }, [visibleMessages]);
+
+  const useCompact = conversationView === 'compact' && compactRenderable;
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView?.({ behavior });
@@ -535,6 +643,152 @@ export function SessionChat({
     !hasRunningAssistantMessage &&
     (!!streamingContent || (streamingParts && streamingParts.length > 0));
 
+  const isBookmarked = (id: string): boolean => {
+    try {
+      return localStorage.getItem(`bookmark:${id}`) === '1';
+    } catch {
+      return false;
+    }
+  };
+
+  // Render a single visible message exactly as the expanded loop does. Shared
+  // by the expanded view and the compact "Worked" disclosure / final answer.
+  const renderSingleMessage = (msg: (typeof visibleMessages)[number]): ReactNode => {
+    if (msg.metadata?.messageType === 'system') {
+      return <SystemMessage key={msg.id} message={msg} />;
+    }
+    if ((isRoomMode && msg.participant) || isRoomSession) {
+      return (
+        <div
+          key={msg.id}
+          id={`msg-${msg.id}`}
+          data-highlighted={highlightedMsgId === msg.id || undefined}
+        >
+          <RoomMessage
+            message={msg}
+            onSelectAgent={handleSelectAgent}
+            selectedAgentId={selectedAgentId}
+            onShowDetail={msg.participant ? handleShowDetail : undefined}
+            onCopy={handleCopy}
+            onRegenerate={handleRegenerate}
+            onBookmark={handleBookmark}
+            bookmarked={isBookmarked(msg.id)}
+          />
+        </div>
+      );
+    }
+    if (msg.role === 'user') {
+      return <UserMessage key={msg.id} message={msg} />;
+    }
+    if (msg.status === 'running') {
+      return <StreamingMessage key={msg.id} content={msg.content} parts={msg.parts} />;
+    }
+    return (
+      <AssistantMessage
+        key={msg.id}
+        message={msg}
+        onCopy={handleCopy}
+        onRegenerate={handleRegenerate}
+        onBookmark={handleBookmark}
+        bookmarked={isBookmarked(msg.id)}
+      />
+    );
+  };
+
+  // Compact rendering of one folded turn: question → "Worked" disclosure → answer.
+  const renderCompactTurn = (turn: (typeof compactTurns)[number]): ReactNode => {
+    const stepCount = turn.intermediaries.length;
+    const expanded = expandedTurns.has(turn.id);
+    const turnRunning =
+      turn.final?.status === 'running' || turn.intermediaries.some((m) => m.status === 'running');
+
+    let workedLabel: string;
+    if (turnRunning) {
+      workedLabel = 'Working…';
+    } else if (turn.user && turn.final) {
+      const seconds = Math.round(
+        (turn.final.createdAt.getTime() - turn.user.createdAt.getTime()) / 1000,
+      );
+      workedLabel =
+        Number.isFinite(seconds) && seconds > 0
+          ? `Worked for ${seconds}s`
+          : `Show work (${stepCount} step${stepCount === 1 ? '' : 's'})`;
+    } else {
+      workedLabel = `Show work (${stepCount} step${stepCount === 1 ? '' : 's'})`;
+    }
+
+    return (
+      <div
+        key={turn.id}
+        className="niuu-chat-compact-turn"
+        data-testid="compact-turn"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'var(--space-5)',
+        }}
+      >
+        {turn.leading.map((m) => renderSingleMessage(m))}
+        {turn.user && renderSingleMessage(turn.user)}
+        {stepCount > 0 && (
+          <div className="niuu-chat-worked">
+            <button
+              type="button"
+              className="niuu-chat-worked-trigger"
+              onClick={() => toggleTurn(turn.id)}
+              aria-expanded={expanded}
+              data-testid="worked-toggle"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-1) var(--space-2)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--color-text-muted)',
+                fontSize: 'var(--text-xs)',
+                fontFamily: 'var(--font-mono)',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              {turnRunning ? (
+                <Loader2
+                  className="niuu-chat-spinner-icon"
+                  style={{ width: 12, height: 12 }}
+                  aria-hidden
+                />
+              ) : expanded ? (
+                <ChevronDown style={{ width: 12, height: 12, flexShrink: 0 }} aria-hidden />
+              ) : (
+                <ChevronRight style={{ width: 12, height: 12, flexShrink: 0 }} aria-hidden />
+              )}
+              <span>{workedLabel}</span>
+            </button>
+            {expanded && (
+              <div
+                className="niuu-chat-worked-steps"
+                data-testid="worked-steps"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 'var(--space-4)',
+                  marginTop: 'var(--space-3)',
+                  marginLeft: 'var(--space-2)',
+                  paddingLeft: 'var(--space-3)',
+                  borderLeft: '2px solid var(--color-border-subtle)',
+                }}
+              >
+                {turn.intermediaries.map((m) => renderSingleMessage(m))}
+              </div>
+            )}
+          </div>
+        )}
+        {turn.final && renderSingleMessage(turn.final)}
+      </div>
+    );
+  };
+
   return (
     <div
       className={cn('niuu-chat-outer-grid', className)}
@@ -599,6 +853,19 @@ export function SessionChat({
               ) : (
                 <EyeOff className="niuu-chat-control-icon" />
               )}
+            </button>
+            <button
+              type="button"
+              className={cn(
+                'niuu-chat-control-btn',
+                conversationView === 'expanded' && 'niuu-chat-control-btn--active',
+              )}
+              onClick={toggleConversationView}
+              title={conversationView === 'expanded' ? 'Compact view' : 'Expanded view'}
+              aria-pressed={conversationView === 'expanded'}
+              data-testid="conversation-view-toggle"
+            >
+              <ListCollapse className="niuu-chat-control-icon" />
             </button>
           </div>
 
@@ -700,73 +967,21 @@ export function SessionChat({
         {hasConversation || isStreaming ? (
           <div className="niuu-chat-messages-container" ref={scrollContainerRef}>
             <div className="niuu-chat-messages-inner">
-              {renderedGroups.map((group) => {
-                if (group.type === 'thread') {
-                  return (
-                    <ThreadGroup
-                      key={group.threadId}
-                      messages={group.messages}
-                      isCollapsed={collapsedThreads.has(group.threadId)}
-                      onToggle={() => toggleThread(group.threadId)}
-                    />
-                  );
-                }
-
-                const msg = group.message;
-                if (msg.metadata?.messageType === 'system') {
-                  return <SystemMessage key={msg.id} message={msg} />;
-                }
-
-                if ((isRoomMode && msg.participant) || isRoomSession) {
-                  return (
-                    <div
-                      key={msg.id}
-                      id={`msg-${msg.id}`}
-                      data-highlighted={highlightedMsgId === msg.id || undefined}
-                    >
-                      <RoomMessage
-                        message={msg}
-                        onSelectAgent={handleSelectAgent}
-                        selectedAgentId={selectedAgentId}
-                        onShowDetail={msg.participant ? handleShowDetail : undefined}
-                        onCopy={handleCopy}
-                        onRegenerate={handleRegenerate}
-                        onBookmark={handleBookmark}
-                        bookmarked={(() => {
-                          try {
-                            return localStorage.getItem(`bookmark:${msg.id}`) === '1';
-                          } catch {
-                            return false;
-                          }
-                        })()}
-                      />
-                    </div>
-                  );
-                }
-
-                if (msg.role === 'user') {
-                  return <UserMessage key={msg.id} message={msg} />;
-                }
-                if (msg.status === 'running') {
-                  return <StreamingMessage key={msg.id} content={msg.content} parts={msg.parts} />;
-                }
-                return (
-                  <AssistantMessage
-                    key={msg.id}
-                    message={msg}
-                    onCopy={handleCopy}
-                    onRegenerate={handleRegenerate}
-                    onBookmark={handleBookmark}
-                    bookmarked={(() => {
-                      try {
-                        return localStorage.getItem(`bookmark:${msg.id}`) === '1';
-                      } catch {
-                        return false;
-                      }
-                    })()}
-                  />
-                );
-              })}
+              {useCompact
+                ? compactTurns.map((turn) => renderCompactTurn(turn))
+                : renderedGroups.map((group) => {
+                    if (group.type === 'thread') {
+                      return (
+                        <ThreadGroup
+                          key={group.threadId}
+                          messages={group.messages}
+                          isCollapsed={collapsedThreads.has(group.threadId)}
+                          onToggle={() => toggleThread(group.threadId)}
+                        />
+                      );
+                    }
+                    return renderSingleMessage(group.message);
+                  })}
 
               {/* Streaming indicator */}
               {isStreaming && (
