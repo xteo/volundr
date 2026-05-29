@@ -1864,7 +1864,14 @@ export function LiveSessionDetailPage({
         }}
       />
 
-      <div className="niuu-min-h-0 niuu-flex-1 niuu-overflow-hidden">
+      {/* Scroll frame for every tab. Inline minHeight/overflow because the
+          niuu-min-h-0 / niuu-overflow-hidden utilities don't reliably apply to
+          this element in the dev CSS bundle; without min-height:0 this flex
+          item can't shrink below its content and the whole page scrolls. */}
+      <div
+        className="niuu-min-h-0 niuu-flex-1 niuu-overflow-hidden"
+        style={{ flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}
+      >
         {activeTab === 'chat' && (
           <div role="tabpanel" className="niuu-flex niuu-h-full niuu-min-h-0 niuu-flex-col">
             {isReady && chatEndpoint ? (
