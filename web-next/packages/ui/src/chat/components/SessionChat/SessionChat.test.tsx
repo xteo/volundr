@@ -892,6 +892,45 @@ describe('SessionChat', () => {
     expect(within(dialog).getByText('/api/v1/credentials/secrets')).toBeInTheDocument();
   });
 
+  it('builds the outcome dialog from the event when no outcome block message exists', () => {
+    const events: MeshOutcomeEvent[] = [
+      {
+        id: 'me-1',
+        type: 'outcome',
+        timestamp: new Date('2026-04-26T12:00:04Z'),
+        participantId: 'peer-1',
+        participant: { color: 'amber' },
+        persona: 'Ravn-A',
+        eventType: 'code_review',
+        verdict: 'approve',
+        // No top-level summary: formatOutcomeMarkdown falls back to fields.summary.
+        fields: {
+          summary: 'Looks good',
+          count: 3, // number -> stringifyOutcomeValue String() branch
+          passed: true, // boolean -> String() branch
+          meta: { nested: 1 }, // object -> JSON.stringify branch
+          notes: 'line one\nline two', // multiline -> pushOutcomeField block branch
+          empty: null, // empty -> pushOutcomeField early-return branch
+        },
+      },
+    ];
+    // messages contains no ```outcome block, so the dialog content is produced by
+    // formatOutcomeMarkdown(event) rather than the extracted-block path.
+    render(
+      <SessionChat
+        {...defaultProps}
+        messages={[roomAssistantMessage]}
+        connected
+        participants={new Map([[participant.peerId, participant]])}
+        meshEvents={events}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Ravn-A outcome')).toBeInTheDocument();
+  });
+
   it('collapses and expands the mesh peers and mesh cascade sidebars', () => {
     const events: MeshOutcomeEvent[] = [
       {

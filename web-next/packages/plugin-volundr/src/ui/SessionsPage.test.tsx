@@ -443,6 +443,53 @@ describe('SessionsPage', () => {
     expect(deleteSession).toHaveBeenCalledWith('stopped-2');
   });
 
+  it('selects all visible stopped sessions and clears the selection', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({ id: 'stopped-1', personaName: 'stopped one', state: 'terminated' }),
+      makeSession({ id: 'stopped-2', personaName: 'stopped two', state: 'terminated' }),
+      makeSession({ id: 'running-1', personaName: 'running one', state: 'running' }),
+    ]);
+    const volundr = createMockVolundrService();
+
+    wrap(store, volundr);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('toggle-stopped-selection-button')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('toggle-stopped-selection-button'));
+
+    fireEvent.click(screen.getByTestId('select-all-stopped-button'));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('clear-stopped-selection-button'));
+    expect(screen.getByText('0 selected')).toBeInTheDocument();
+  });
+
+  it('stops and archives a session from the row hover actions', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({ id: 'run-stop', personaName: 'stop me', state: 'running' }),
+      makeSession({ id: 'run-arch', personaName: 'archive me', state: 'running' }),
+    ]);
+    const volundr = createMockVolundrService();
+    const stopSession = vi.fn().mockResolvedValue(undefined);
+    const archiveSession = vi.fn().mockResolvedValue(undefined);
+    (volundr as IVolundrService).stopSession = stopSession;
+    (volundr as IVolundrService).archiveSession = archiveSession;
+
+    wrap(store, volundr);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('pod-entry-run-stop-stop')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('pod-entry-run-stop-stop'));
+    await waitFor(() => expect(stopSession).toHaveBeenCalledWith('run-stop'));
+
+    fireEvent.click(screen.getByTestId('pod-entry-run-arch-archive'));
+    await waitFor(() => expect(archiveSession).toHaveBeenCalledWith('run-arch'));
+    // Archive of an active session stops it first.
+    expect(stopSession).toHaveBeenCalledWith('run-arch');
+  });
+
   it('navigates back to the sessions list when deleting the selected stopped session', async () => {
     const store = createSessionStoreWithSessions([
       makeSession({ id: 'ds-1', personaName: 'stopped current', state: 'terminated' }),
