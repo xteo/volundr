@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # Default configuration values
 DEFAULT_WORKSPACES_DIR = "~/.niuu/workspaces"
 DEFAULT_CLAUDE_BINARY = "claude"
-DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_MAX_CONCURRENT = 8
 DEFAULT_SDK_PORT_START = 9100
 DEFAULT_STOP_TIMEOUT = 10
 DEFAULT_STATE_FILE = "~/.niuu/forge-state.json"

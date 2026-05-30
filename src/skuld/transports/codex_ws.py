@@ -138,11 +138,15 @@ class CodexWebSocketTransport(CLITransport):
         initial_prompt: str = "",
         codex_port: int = 0,
         mcp_servers: list[dict] | None = None,
+        reasoning_effort: str = "",
+        fast_mode: bool = False,
         **_kwargs: object,
     ) -> None:
         super().__init__()
         self.workspace_dir = workspace_dir
         self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._fast_mode = fast_mode
         self._skip_permissions = skip_permissions
         self._approval_policy = approval_policy.strip()
         self._sandbox = sandbox.strip()
@@ -415,6 +419,24 @@ class CodexWebSocketTransport(CLITransport):
         }
         if self._model:
             thread_params["model"] = self._model
+        # Reasoning effort -> codex thread param. Codex accepts
+        # minimal/low/medium/high; map extra-high/xhigh/max to the highest
+        # supported value so an unknown alias can never break the session.
+        if self._reasoning_effort:
+            _eff = self._reasoning_effort.strip().lower()
+            _map = {
+                "minimal": "minimal",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "extra-high": "high",
+                "extra_high": "high",
+                "xhigh": "high",
+                "max": "high",
+            }
+            thread_params["modelReasoningEffort"] = _map.get(_eff, "high")
+        # fast_mode is a Claude Code concept; codex has no equivalent thread
+        # param, so it is intentionally accepted-but-not-emitted here.
         thread_params.update(self._permission_thread_params())
         if self._system_prompt:
             # baseInstructions = role/persona ("you are a service developer…")
