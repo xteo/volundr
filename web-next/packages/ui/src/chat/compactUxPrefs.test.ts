@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  getCompactUxChatPrefs,
-  getConversationView,
-  setConversationView,
-} from './compactUxPrefs';
+import { getCompactUxChatPrefs, getConversationView, setConversationView } from './compactUxPrefs';
 
 const NS = 'niuu.compactUx.';
 
@@ -81,5 +77,18 @@ describe('compactUxPrefs — conversation view', () => {
     });
     expect(() => setConversationView('expanded')).not.toThrow();
     setSpy.mockRestore();
+  });
+
+  it('returns defaults and no-ops under SSR (no window)', () => {
+    vi.stubGlobal('window', undefined);
+    expect(getCompactUxChatPrefs()).toEqual({
+      showMessageActions: false,
+      showAgentAvatar: false,
+      timestamp: 'hover',
+      copyMode: 'hover',
+    });
+    expect(getConversationView()).toBe('compact');
+    expect(() => setConversationView('expanded')).not.toThrow();
+    vi.unstubAllGlobals();
   });
 });

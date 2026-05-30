@@ -49,4 +49,11 @@ describe('uxPrefs — showDebugMeta', () => {
     expect(() => setShowDebugMeta(true)).not.toThrow();
     setSpy.mockRestore();
   });
+
+  it('returns the default and no-ops under SSR (no window)', () => {
+    vi.stubGlobal('window', undefined);
+    expect(getShowDebugMeta()).toBe(false);
+    expect(() => setShowDebugMeta(true)).not.toThrow();
+    vi.unstubAllGlobals();
+  });
 });

@@ -893,6 +893,9 @@ describe('SessionChat', () => {
   });
 
   it('builds the outcome dialog from the event when no outcome block message exists', () => {
+    // Circular reference: JSON.stringify throws -> stringifyOutcomeValue catch branch.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
     const events: MeshOutcomeEvent[] = [
       {
         id: 'me-1',
@@ -911,6 +914,7 @@ describe('SessionChat', () => {
           meta: { nested: 1 }, // object -> JSON.stringify branch
           notes: 'line one\nline two', // multiline -> pushOutcomeField block branch
           empty: null, // empty -> pushOutcomeField early-return branch
+          circular, // unserializable -> stringifyOutcomeValue catch branch
         },
       },
     ];
@@ -929,6 +933,34 @@ describe('SessionChat', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show details' }));
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByText('Ravn-A outcome')).toBeInTheDocument();
+  });
+
+  it('falls back to event_type when an outcome event has no verdict, summary or fields', () => {
+    const events: MeshOutcomeEvent[] = [
+      {
+        id: 'me-bare',
+        type: 'outcome',
+        timestamp: new Date('2026-04-26T12:00:04Z'),
+        participantId: 'peer-1',
+        participant: { color: 'amber' },
+        persona: 'Ravn-A',
+        eventType: 'code_review',
+        // No verdict / summary / fields: formatOutcomeMarkdown takes the
+        // lines.length === 0 branch and emits event_type instead.
+      },
+    ];
+    render(
+      <SessionChat
+        {...defaultProps}
+        messages={[roomAssistantMessage]}
+        connected
+        participants={new Map([[participant.peerId, participant]])}
+        meshEvents={events}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
   it('collapses and expands the mesh peers and mesh cascade sidebars', () => {

@@ -478,9 +478,7 @@ describe('SessionsPage', () => {
 
     wrap(store, volundr);
 
-    await waitFor(() =>
-      expect(screen.getByTestId('pod-entry-run-stop-stop')).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByTestId('pod-entry-run-stop-stop')).toBeInTheDocument());
     fireEvent.click(screen.getByTestId('pod-entry-run-stop-stop'));
     await waitFor(() => expect(stopSession).toHaveBeenCalledWith('run-stop'));
 
