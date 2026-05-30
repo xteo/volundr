@@ -1,7 +1,17 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { UserMessage, AssistantMessage, StreamingMessage, SystemMessage } from './ChatMessages';
 import type { ChatMessage } from '../../types';
+
+// The per-message action bar (copy/regenerate/bookmark) is opt-in and hidden by
+// default (compactUxPrefs.showMessageActions). These tests assert that wiring,
+// so enable it for the suite; clear after so other suites see the real default.
+beforeEach(() => {
+  localStorage.setItem('niuu.compactUx.showMessageActions', '1');
+});
+afterEach(() => {
+  localStorage.clear();
+});
 
 const now = new Date('2024-01-01T12:00:00Z');
 

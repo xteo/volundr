@@ -4,7 +4,7 @@ import '@niuulabs/design-tokens/tokens.css';
 import '@niuulabs/ui/styles.css';
 import '@niuulabs/shell/index.css';
 import '@niuulabs/plugin-login/styles.css';
-// lexi/ux-update: only enabled-module CSS is loaded (see pluginConfig.ts).
+// niuu-ux: only enabled-module CSS is loaded (see pluginConfig.ts).
 import '@niuulabs/plugin-volundr/styles.css';
 import '@niuulabs/plugin-volundr/index.css';
 import './styles.css';

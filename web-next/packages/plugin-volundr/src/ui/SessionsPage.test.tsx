@@ -140,7 +140,7 @@ function createSessionStoreWithSessions(sessions: Session[]): ISessionStore {
 describe('SessionsPage', () => {
   beforeEach(() => {
     navigate.mockClear();
-    // lexi/ux-update: reset persisted UX prefs (folded groups, hide-archived)
+    // niuu-ux: reset persisted UX prefs (folded groups, hide-archived)
     // so default-collapse / default-hide behavior is deterministic per test.
     try {
       window.localStorage.clear();
@@ -361,7 +361,7 @@ describe('SessionsPage', () => {
 
   it('renders the forge label when a session has an instance name', async () => {
     // The forge/cluster id is debug metadata, hidden unless explicitly enabled.
-    window.localStorage.setItem('niuu.lexiUx.showDebugMeta', '1');
+    window.localStorage.setItem('niuu.compactUx.showDebugMeta', '1');
     const store = createSessionStoreWithSessions([
       makeSession({
         id: 'forge-1',
@@ -379,7 +379,7 @@ describe('SessionsPage', () => {
       expect(row).toHaveTextContent(/forge/i);
       expect(row).toHaveTextContent('Guild Alpha');
     } finally {
-      window.localStorage.removeItem('niuu.lexiUx.showDebugMeta');
+      window.localStorage.removeItem('niuu.compactUx.showDebugMeta');
     }
   });
 

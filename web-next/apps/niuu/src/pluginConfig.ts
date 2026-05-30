@@ -1,4 +1,4 @@
-// Module visibility configuration (lexi/ux-update).
+// Module visibility configuration (niuu-ux).
 //
 // This is the single place that curates which platform modules appear in the
 // left rail. It is *config*, not commented-out code: edit ENABLED_PLUGINS to

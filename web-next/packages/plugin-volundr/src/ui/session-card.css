@@ -1,4 +1,4 @@
-/* lexi/ux-update: session-list row interactions.
+/* niuu-ux: session-list row interactions.
    Plain component CSS (not niuu-* utilities) because those silently fail to
    apply in the dev bundle. See verify-niuu-ui notes. */
 

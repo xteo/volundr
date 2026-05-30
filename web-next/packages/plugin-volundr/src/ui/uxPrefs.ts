@@ -1,10 +1,10 @@
-// lexi/ux-update: "debug metadata" visibility toggle.
+// niuu-ux: "debug metadata" visibility toggle.
 //
 // Platform plumbing — forge/cluster IDs, pod GUIDs, owner ids and similar — is
 // useful when debugging Volundr but noise for the operator. It is hidden by
-// default and can be revealed by setting `niuu.lexiUx.showDebugMeta` to "1" in
-// localStorage (same `niuu.lexiUx.*` namespace as the chat UX prefs).
-const SHOW_DEBUG_META_KEY = 'niuu.lexiUx.showDebugMeta';
+// default and can be revealed by setting `niuu.compactUx.showDebugMeta` to "1" in
+// localStorage (same `niuu.compactUx.*` namespace as the chat UX prefs).
+const SHOW_DEBUG_META_KEY = 'niuu.compactUx.showDebugMeta';
 
 /** True only when the operator has explicitly opted into debug metadata. */
 export function getShowDebugMeta(): boolean {

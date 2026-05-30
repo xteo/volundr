@@ -19,7 +19,7 @@ import { MarkdownContent } from '../MarkdownContent';
 import { ToolBlock, ToolGroupBlock, groupContentBlocks } from '../ToolBlock';
 import type { ChatMessage, ChatMessagePart } from '../../types';
 import type { ContentBlock as ToolContentBlock } from '../ToolBlock';
-import { getLexiUxChatPrefs } from '../../lexiUxPrefs';
+import { getCompactUxChatPrefs } from '../../compactUxPrefs';
 import './ChatMessages.css';
 
 const formatTime = (date: Date): string =>
@@ -149,7 +149,7 @@ export function AssistantMessage({
     handleCopyClick();
   }, [message.content, onCopy, handleCopyClick]);
 
-  const uxPrefs = getLexiUxChatPrefs();
+  const uxPrefs = getCompactUxChatPrefs();
 
   return (
     <div className="niuu-chat-assistant-wrapper" data-testid="assistant-message">

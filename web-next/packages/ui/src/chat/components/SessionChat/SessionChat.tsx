@@ -39,7 +39,11 @@ import type {
 } from '../../types';
 import type { FileAttachment } from '../../hooks/useFileAttachments';
 import type { SlashCommand } from '../../utils/slashCommands';
-import { getConversationView, setConversationView, type ConversationView } from '../../lexiUxPrefs';
+import {
+  getConversationView,
+  setConversationView,
+  type ConversationView,
+} from '../../compactUxPrefs';
 import './SessionChat.css';
 
 const SCROLL_THRESHOLD = 150;

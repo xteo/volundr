@@ -419,8 +419,8 @@ function PodGroup({
 // SessionsPage — master-detail layout
 // ---------------------------------------------------------------------------
 
-// lexi/ux-update: configurable (drag-resizable) left session column, persisted.
-const LEFT_WIDTH_KEY = 'niuu.lexiUx.sessions.leftWidth';
+// niuu-ux: configurable (drag-resizable) left session column, persisted.
+const LEFT_WIDTH_KEY = 'niuu.compactUx.sessions.leftWidth';
 const LEFT_MIN_PX = 200;
 const LEFT_MAX_PX = 560;
 const LEFT_DEFAULT_PX = 300;
@@ -430,9 +430,9 @@ function readLeftWidth(): number {
   return Number.isFinite(v) && v >= LEFT_MIN_PX && v <= LEFT_MAX_PX ? v : LEFT_DEFAULT_PX;
 }
 
-// lexi/ux-update: foldable groups + hide-archived, persisted in localStorage.
-const FOLDED_GROUPS_KEY = 'niuu.lexiUx.sessions.foldedGroups';
-const HIDE_ARCHIVED_KEY = 'niuu.lexiUx.sessions.hideArchived';
+// niuu-ux: foldable groups + hide-archived, persisted in localStorage.
+const FOLDED_GROUPS_KEY = 'niuu.compactUx.sessions.foldedGroups';
+const HIDE_ARCHIVED_KEY = 'niuu.compactUx.sessions.hideArchived';
 /** Groups folded away by default on first load. */
 const DEFAULT_FOLDED_GROUPS = ['ARCHIVED', 'STOPPED'];
 

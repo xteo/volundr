@@ -137,7 +137,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    // lexi/ux-update live preview: bind all interfaces so the dev server is
+    // niuu-ux live preview: bind all interfaces so the dev server is
     // reachable over Tailscale, and proxy API/SSE/WS to the live niuu backend
     // on :8080 so the preview shows real Forge data.
     host: true,
