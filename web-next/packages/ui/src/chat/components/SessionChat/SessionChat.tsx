@@ -698,7 +698,10 @@ export function SessionChat({
   // Compact rendering of one folded turn: question → "Worked" disclosure → answer.
   const renderCompactTurn = (turn: (typeof compactTurns)[number]): ReactNode => {
     const stepCount = turn.intermediaries.length;
-    const expanded = expandedTurns.has(turn.id);
+    // The "show tool calls and results" eye (showInternal) reveals the work
+    // inline: when it is on, every turn's intermediary steps (tool calls/results)
+    // are expanded without needing to click each "Worked" disclosure.
+    const expanded = expandedTurns.has(turn.id) || showInternal;
     const turnRunning =
       turn.final?.status === 'running' || turn.intermediaries.some((m) => m.status === 'running');
 

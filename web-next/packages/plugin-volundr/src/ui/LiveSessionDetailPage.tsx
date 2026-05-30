@@ -47,6 +47,7 @@ import {
 import { deriveTerminalWsUrl, normalizeSessionUrl, wsUrlToHttpBase } from './liveSessionTransport';
 import { SessionTerminalLive } from './SessionTerminalLive';
 import { StructuredLogViewer } from './components/StructuredLogViewer';
+import { getShowDebugMeta } from './uxPrefs';
 import './LiveSessionDetailPage.css';
 
 type SessionTab = 'chat' | 'terminal' | 'diffs' | 'files' | 'chronicles' | 'logs';
@@ -1732,8 +1733,13 @@ export function LiveSessionDetailPage({
             <span className="niuu-inline-flex niuu-flex-shrink-0 niuu-items-center niuu-gap-2 niuu-rounded-md niuu-border niuu-border-border-subtle niuu-bg-bg-elevated niuu-px-2.5 niuu-py-1 niuu-font-mono niuu-text-[11px] niuu-text-text-secondary">
               {modelLabel}
             </span>
-            <HeaderDivider />
-            <SessionIdChip sessionId={sessionId} />
+            {/* Raw session GUID is debug plumbing — only show with debug meta on. */}
+            {showDebugMeta && (
+              <>
+                <HeaderDivider />
+                <SessionIdChip sessionId={sessionId} />
+              </>
+            )}
             {readOnly && (
               <>
                 <HeaderDivider />
@@ -1750,8 +1756,13 @@ export function LiveSessionDetailPage({
             <HeaderMetric label="Msgs" value={formatCount(liveSession?.messageCount ?? 0)} />
             <HeaderDivider />
             <HeaderMetric label="Tokens" value={formatCount(liveSession?.tokensUsed ?? 0)} />
-            <HeaderDivider />
-            <HeaderMetric label="Forge" value={sessionForgeLabel(liveSession)} />
+            {/* Forge/instance label is debug plumbing — gate behind debug meta. */}
+            {showDebugMeta && (
+              <>
+                <HeaderDivider />
+                <HeaderMetric label="Forge" value={sessionForgeLabel(liveSession)} />
+              </>
+            )}
           </div>
         </div>
         <div

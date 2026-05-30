@@ -107,7 +107,7 @@ const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
     displayName: 'Claude Code',
     description: '',
     labels: [],
-    defaultModel: '',
+    defaultModel: 'claude-opus-4-8',
     compatibleProviders: ['anthropic'],
   },
   {
@@ -115,7 +115,7 @@ const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
     displayName: 'Codex',
     description: '',
     labels: [],
-    defaultModel: '',
+    defaultModel: 'gpt-5.5',
     compatibleProviders: ['openai'],
   },
   {
@@ -1134,7 +1134,7 @@ export function RuntimeStep({
                 <Input
                   value={form.model}
                   onChange={(e) => update({ model: e.target.value })}
-                  placeholder="sonnet-primary"
+                  placeholder="claude-opus-4-8"
                 />
               )}
             </Field>
@@ -1965,7 +1965,7 @@ export function LaunchWizard({ open, onOpenChange, initialTemplateId }: LaunchWi
     envVars: [],
     setupScripts: [],
     definition: 'skuldClaude',
-    model: 'sonnet-primary',
+    model: 'claude-opus-4-8',
     permission: 'restricted',
     cpu: '2',
     mem: '8Gi',

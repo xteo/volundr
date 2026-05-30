@@ -195,7 +195,14 @@ function PodEntry({
 }) {
   const canStop = STOPPABLE_STATES.includes(session.state);
   const canArchive = session.state !== 'archived';
-  const ageLabel = relTime(new Date(session.lastActivityAt ?? session.startedAt).getTime());
+  const lastActiveMs = new Date(session.lastActivityAt ?? session.startedAt).getTime();
+  const ageLabel = relTime(lastActiveMs);
+  // Pulse only when the session is genuinely working right now. The backend keeps
+  // status 'running' even after the agent finished its turn (it does not set
+  // activity_state on the list payload), so a stale "running" pod would otherwise
+  // pulse forever. Treat a running session with no activity in the last 45s as
+  // idle: solid dot, no pulse.
+  const isActivelyWorking = session.state === 'running' && Date.now() - lastActiveMs < 45_000;
   const primaryLabel = session.name || session.personaName || '(unnamed)';
   // saga/run/ravn id and forge/cluster id are platform plumbing. ravnId in
   // particular falls back to the owner id ("dev-user") when there is no real
@@ -234,7 +241,7 @@ function PodEntry({
           : 'niuu-border-transparent niuu-border-b-white/6',
       )}
     >
-      <StateDot state={SESSION_DOT[session.state]} pulse={session.state === 'running'} />
+      <StateDot state={SESSION_DOT[session.state]} pulse={isActivelyWorking} />
       {collapsed ? null : (
         <>
           <div className="niuu-flex-1 niuu-min-w-0 niuu-flex niuu-flex-col niuu-gap-0.5">
@@ -242,7 +249,7 @@ function PodEntry({
               <span className="niuu-flex-1 niuu-min-w-0 niuu-font-mono niuu-text-[13px] niuu-font-medium niuu-text-text-primary niuu-truncate">
                 {primaryLabel}
               </span>
-              <span className="niuu-flex-shrink-0 niuu-font-mono niuu-text-[10px] niuu-text-text-secondary">
+              <span className="lx-pod-age niuu-flex-shrink-0 niuu-font-mono niuu-text-[10px] niuu-text-text-secondary">
                 {ageLabel}
               </span>
             </div>
@@ -303,7 +310,7 @@ function PodEntry({
                     onStop(session.id);
                   }}
                 >
-                  <Square className="niuu-h-3.5 niuu-w-3.5" fill="currentColor" />
+                  <Square size={11} fill="currentColor" />
                 </button>
               ) : null}
               {canArchive && onArchive ? (
@@ -319,7 +326,7 @@ function PodEntry({
                     onArchive(session.id);
                   }}
                 >
-                  <Archive className="niuu-h-3.5 niuu-w-3.5" />
+                  <Archive size={11} />
                 </button>
               ) : null}
             </div>
@@ -696,7 +703,7 @@ export function SessionsPage() {
             </div>
           ) : (
             <div className="niuu-flex niuu-h-full niuu-flex-col niuu-overflow-hidden">
-              <div className="niuu-flex niuu-items-center niuu-justify-between niuu-border-b niuu-border-white/8 niuu-px-2.5 niuu-py-2">
+              <div className="niuu-flex niuu-items-center niuu-justify-between niuu-border-b niuu-border-white/8 niuu-px-3 niuu-py-2">
                 <div className="niuu-flex niuu-items-center niuu-gap-1.5">
                   <h2 className="niuu-text-sm niuu-font-semibold niuu-text-text-primary">
                     Sessions
@@ -719,12 +726,12 @@ export function SessionsPage() {
                 </button>
               </div>
 
-              <div className="niuu-flex niuu-items-center niuu-gap-2 niuu-px-2.5 niuu-py-1">
-                <span className="niuu-text-[10px] niuu-font-mono niuu-text-text-faint">
+              <div className="niuu-flex niuu-items-center niuu-gap-2 niuu-px-3 niuu-py-1">
+                <span className="niuu-text-[10px] niuu-font-mono niuu-text-text-secondary">
                   group by
                 </span>
                 <div
-                  className="niuu-inline-flex niuu-rounded-lg niuu-border niuu-border-border-subtle niuu-bg-bg-tertiary niuu-p-0.5"
+                  className="niuu-inline-flex niuu-gap-1 niuu-rounded-lg niuu-border niuu-border-border-subtle niuu-bg-bg-tertiary niuu-p-1"
                   data-testid="pod-group-mode"
                 >
                   {(['state', 'repo', 'forge'] as const).map((mode) => {
@@ -735,7 +742,7 @@ export function SessionsPage() {
                         type="button"
                         onClick={() => setSidebarMode(mode)}
                         className={cn(
-                          'niuu-rounded-md niuu-px-2.5 niuu-py-1 niuu-font-mono niuu-text-[10px] niuu-transition-colors',
+                          'niuu-rounded-md niuu-px-3 niuu-py-1 niuu-font-mono niuu-text-[10px] niuu-transition-colors',
                           active
                             ? 'niuu-bg-brand/15 niuu-text-brand'
                             : 'niuu-text-text-muted hover:niuu-text-text-primary',
@@ -748,7 +755,7 @@ export function SessionsPage() {
                     );
                   })}
                 </div>
-                {sidebarMode === 'state' && archivedCount > 0 ? (
+                {archivedCount > 0 ? (
                   <button
                     type="button"
                     onClick={() => setHideArchived((v) => !v)}
@@ -767,7 +774,7 @@ export function SessionsPage() {
                 ) : null}
               </div>
 
-              <div className="niuu-px-2.5 niuu-pb-1">
+              <div className="niuu-px-3 niuu-pb-1">
                 <div className="niuu-flex niuu-items-center niuu-gap-2">
                   <button
                     type="button"

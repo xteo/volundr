@@ -39,13 +39,20 @@
   pointer-events: auto;
 }
 
+/* When the action cluster is showing, hide the age/time so the row stays clean
+   (the buttons occupy that top-right corner). */
+.lx-pod-entry:hover .lx-pod-age,
+.lx-pod-entry:focus-within .lx-pod-age {
+  opacity: 0;
+}
+
 .lx-pod-action-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   color: var(--color-text-muted);
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-subtle);
