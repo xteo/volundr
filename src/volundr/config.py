@@ -209,7 +209,7 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
             display_name="Claude Code",
             description="Anthropic Claude — full IDE with terminal, tools, and MCP",
             labels=["session", "claude"],
-            default_model="claude-sonnet-4-6",
+            default_model="claude-opus-4-8",
             compatible_providers=["anthropic"],
             defaults={
                 "broker": {
@@ -241,8 +241,7 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
             enabled=True,
             display_name="OpenAI Codex (Batch)",
             description=(
-                "OpenAI Codex — subprocess transport tuned for autonomous workflow "
-                "execution"
+                "OpenAI Codex — subprocess transport tuned for autonomous workflow execution"
             ),
             labels=["session", "codex", "batch"],
             default_model="",
@@ -320,7 +319,7 @@ class ChronicleConfig(BaseModel):
     """Chronicle feature configuration."""
 
     auto_create_on_stop: bool = Field(default=True)
-    summary_model: str = Field(default="claude-haiku-4-5-20251001")
+    summary_model: str = Field(default="claude-opus-4-8")
     summary_max_tokens: int = Field(default=2000)
     retention_days: int | None = Field(default=None)  # None = keep forever
 

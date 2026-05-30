@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # Default configuration values
 DEFAULT_WORKSPACES_DIR = "~/.niuu/workspaces"
 DEFAULT_CLAUDE_BINARY = "claude"
-DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_MAX_CONCURRENT = 8
 DEFAULT_SDK_PORT_START = 9100
 DEFAULT_STOP_TIMEOUT = 10
 DEFAULT_STATE_FILE = "~/.niuu/forge-state.json"
@@ -909,7 +909,7 @@ class LocalProcessPodManager(PodManager):
 
         env["SKULD__SESSION__ID"] = session_id
         env["SKULD__SESSION__NAME"] = session.name
-        model = session.model or spec.values.get("model", "claude-sonnet-4-6")
+        model = session.model or spec.values.get("model", "")
         env["SKULD__SESSION__MODEL"] = model
         env["SKULD__SESSION__WORKSPACE_DIR"] = str(workspace)
         env["SKULD__HOST"] = "127.0.0.1"
