@@ -140,11 +140,26 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // niuu-ux live preview: bind all interfaces so the dev server is reachable
+    // over Tailscale, and proxy API/SSE/WS to the live niuu backend so the
+    // preview shows real Forge data.
+    host: true,
+    // Reached via the Tailscale MagicDNS name (thor-host.…ts.net), so vite's
+    // host check must allow it. Trusted-tailnet dev preview only.
+    allowedHosts: true,
     proxy: {
-      '/api': {
-        target: apiProxyTarget,
-        changeOrigin: true,
-      },
+      '/api': { target: apiProxyTarget, changeOrigin: true },
+      '/config.json': { target: apiProxyTarget, changeOrigin: true },
+      '/health': { target: apiProxyTarget, changeOrigin: true },
+      '/healthz': { target: apiProxyTarget, changeOrigin: true },
+      '/mcp': { target: apiProxyTarget, changeOrigin: true },
+      '/mimir': { target: apiProxyTarget, changeOrigin: true },
+      '/audit': { target: apiProxyTarget, changeOrigin: true },
+      // NB: trailing slash is required — a bare '/s' prefix-matches '/src/*'
+      // (vite's own modules) and breaks the app. Skuld routes are '/s/{id}/…'.
+      // This /s/ proxy is what makes the session WS + conversation history go
+      // same-origin (the CORS fix).
+      '/s/': { target: apiProxyTarget, changeOrigin: true, ws: true },
     },
   },
 });

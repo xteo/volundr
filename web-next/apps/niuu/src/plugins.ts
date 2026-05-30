@@ -1,64 +1,13 @@
-import { createElement } from 'react';
 import { createRoute } from '@tanstack/react-router';
-import { bifrostPlugin } from '@niuulabs/plugin-bifrost/plugin';
 import { loginPlugin } from '@niuulabs/plugin-login';
-import { ravnPlugin } from '@niuulabs/plugin-ravn';
-import { mimirPlugin } from '@niuulabs/plugin-mimir';
-import { observatoryPlugin } from '@niuulabs/plugin-observatory';
-import { tingPlugin } from '@niuulabs/plugin-ting';
 import { volundrPlugin } from '@niuulabs/plugin-volundr';
 import { definePlugin, type PluginDescriptor } from '@niuulabs/plugin-sdk';
-import { GuildPage } from './GuildPage';
 import { SettingsPage } from './SettingsPage';
-
-function GuildTopbar() {
-  return createElement(
-    'button',
-    {
-      type: 'button',
-      onClick: () => {
-        window.dispatchEvent(new Event('guild:open-register'));
-      },
-      className:
-        'niuu-inline-flex niuu-items-center niuu-gap-2 niuu-rounded-lg niuu-border niuu-border-brand/35 niuu-bg-brand/12 niuu-px-3 niuu-py-1.5 niuu-text-[12px] niuu-font-medium niuu-text-brand hover:niuu-bg-brand/18',
-    },
-    '+ register',
-  );
-}
-
-const guildPlugin = definePlugin({
-  id: 'guild',
-  rune: 'ᚹ',
-  title: 'Guild',
-  subtitle: 'runtime registry',
-  tabs: [
-    { id: 'instances', label: 'Instances', path: '/guild' },
-    { id: 'access', label: 'Access', path: '/guild/access' },
-    { id: 'connections', label: 'Connections', path: '/guild/connections' },
-  ],
-  routes: (rootRoute) => [
-    createRoute({
-      getParentRoute: () => rootRoute,
-      path: '/guild',
-      component: GuildPage,
-    }),
-    createRoute({
-      getParentRoute: () => rootRoute,
-      path: '/guild/access',
-      component: GuildPage,
-    }),
-    createRoute({
-      getParentRoute: () => rootRoute,
-      path: '/guild/connections',
-      component: GuildPage,
-    }),
-  ],
-  topbarRight: () => createElement(GuildTopbar),
-});
+import { ENABLED_PLUGINS, type PluginId } from './pluginConfig';
 
 const settingsPlugin = definePlugin({
   id: 'settings',
-  rune: '\u2699',
+  rune: '⚙',
   title: 'Settings',
   subtitle: 'configuration',
   position: 'bottom',
@@ -81,14 +30,45 @@ const settingsPlugin = definePlugin({
   ],
 });
 
-export const plugins: PluginDescriptor[] = [
-  loginPlugin,
-  bifrostPlugin,
-  volundrPlugin,
-  tingPlugin,
-  mimirPlugin,
-  ravnPlugin,
-  observatoryPlugin,
-  guildPlugin,
-  settingsPlugin,
-];
+// Always-on essentials are imported statically. Optional / heavy modules are
+// LAZY: their import only runs when the id is listed in ENABLED_PLUGINS
+// (pluginConfig.ts), so a disabled module is never compiled by the dev server
+// or shipped in the bundle. This is the config-driven enable/disable mechanism
+// — to toggle a module, edit ENABLED_PLUGINS, not this file.
+const STATIC_PLUGINS: Partial<Record<PluginId, PluginDescriptor>> = {
+  login: loginPlugin,
+  volundr: volundrPlugin,
+  settings: settingsPlugin,
+};
+
+const LAZY_PLUGINS: Partial<Record<PluginId, () => Promise<PluginDescriptor>>> = {
+  guild: async () => (await import('./guild')).guildPlugin,
+  bifrost: async () => (await import('@niuulabs/plugin-bifrost/plugin')).bifrostPlugin,
+  ting: async () => (await import('@niuulabs/plugin-ting')).tingPlugin,
+  mimir: async () => (await import('@niuulabs/plugin-mimir')).mimirPlugin,
+  ravn: async () => (await import('@niuulabs/plugin-ravn')).ravnPlugin,
+  observatory: async () => (await import('@niuulabs/plugin-observatory')).observatoryPlugin,
+};
+
+/** Resolve the enabled plugins (in ENABLED_PLUGINS order), lazy-loading any
+ * optional modules. Disabled modules are never imported. */
+export async function loadEnabledPlugins(): Promise<PluginDescriptor[]> {
+  const out: PluginDescriptor[] = [];
+  for (const id of ENABLED_PLUGINS) {
+    const stat = STATIC_PLUGINS[id];
+    if (stat) {
+      out.push(stat);
+      continue;
+    }
+    const lazy = LAZY_PLUGINS[id];
+    if (lazy) out.push(await lazy());
+  }
+  return out;
+}
+
+/** Synchronous view of the statically-available enabled plugins (used by tests
+ * and any sync consumer). The app uses loadEnabledPlugins() so lazy modules are
+ * included too. */
+export const plugins: PluginDescriptor[] = ENABLED_PLUGINS.map((id) => STATIC_PLUGINS[id]).filter(
+  (p): p is PluginDescriptor => Boolean(p),
+);

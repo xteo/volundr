@@ -123,6 +123,12 @@ describe('SessionChat', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    // niuu-ux made the per-message action bar opt-in and the conversation
+    // view compact-by-default. These tests assert the copy/regenerate/bookmark
+    // wiring and the inline message layout, so opt those back on for the suite;
+    // the product defaults (hidden actions, compact view) are unchanged.
+    localStorage.setItem('niuu.compactUx.showMessageActions', '1');
+    localStorage.setItem('niuu.compactUx.conversationView', 'expanded');
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
   });
 

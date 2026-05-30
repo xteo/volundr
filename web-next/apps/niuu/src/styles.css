@@ -31,3 +31,22 @@ select {
 
 @tailwind components;
 @tailwind utilities;
+
+/* niuu-ux: the niuu-min-h-0 / niuu-overflow-hidden utilities silently
+   fail to apply on some flex items in the loaded CSS bundle (verified: a flex
+   item carrying niuu-min-h-0 computes min-height:auto, so it can't shrink and
+   its content overflows the whole shell instead of scrolling internally). This
+   broke the scroll frame on every session tab. Force the intended values from
+   the app's own (last-loaded) stylesheet so the flex scroll chains work. */
+.niuu-min-h-0 {
+  min-height: 0 !important;
+}
+.niuu-overflow-hidden {
+  overflow: hidden !important;
+}
+.niuu-overflow-auto {
+  overflow: auto !important;
+}
+.niuu-overflow-y-auto {
+  overflow-y: auto !important;
+}

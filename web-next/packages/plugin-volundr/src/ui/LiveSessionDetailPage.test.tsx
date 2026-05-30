@@ -556,6 +556,10 @@ describe('LiveSessionDetailPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     navigate.mockReset();
+    // The header's session-id chip and Forge metric are debug plumbing, hidden
+    // unless the operator opts in. These tests assert that header content, so
+    // enable debug metadata for the suite (product default keeps them hidden).
+    localStorage.setItem('niuu.compactUx.showDebugMeta', '1');
     global.fetch = vi.fn(async (input: string | URL | Request) => {
       const url =
         typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;

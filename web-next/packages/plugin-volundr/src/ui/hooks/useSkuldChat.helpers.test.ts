@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  extractInlineImages,
   formatOutcomeContent,
   getNumber,
   getStorageKey,
@@ -155,5 +156,32 @@ describe('useSkuldChat helpers', () => {
     expect(parseEvent('data: {"type":"ping"}')).toEqual({ type: 'ping' });
     expect(parseEvent('{"type":"pong"}')).toEqual({ type: 'pong' });
     expect(parseEvent('not-json')).toBeNull();
+  });
+
+  it('lifts an inline image from a content-blocks-array message into an attachment', () => {
+    const data = `/9j/${'A'.repeat(400)}`; // jpeg magic + base64 body
+    const content = JSON.stringify([
+      { type: 'text', text: 'Can you describe what you see in that image?' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } },
+    ]);
+
+    const result = extractInlineImages(content);
+    expect(result.text).toBe('Can you describe what you see in that image?');
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0]).toMatchObject({ type: 'image', contentType: 'image/jpeg' });
+    expect(result.attachments[0].previewUrl).toBe(`data:image/jpeg;base64,${data}`);
+
+    // plain text passes through untouched (no attachments)
+    expect(extractInlineImages('just a normal message')).toEqual({
+      text: 'just a normal message',
+      attachments: [],
+    });
+
+    // and it flows through the reload path (transformTurns)
+    const [msg] = transformTurns([
+      { id: 't1', role: 'user', content, created_at: '2026-05-01T10:00:00+00:00' },
+    ] as never);
+    expect(msg.content).toBe('Can you describe what you see in that image?');
+    expect(msg.attachments?.[0]?.previewUrl).toBe(`data:image/jpeg;base64,${data}`);
   });
 });
