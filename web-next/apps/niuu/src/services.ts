@@ -1283,9 +1283,13 @@ export function buildServices(config: NiuuConfig): ServicesMap {
     ? buildVolundrHttpAdapter(createApiClient(volundrBase))
     : createMockVolundrService();
   const sharedApiBase = resolveSharedApiBase(config);
+  // The aggregate adapter is what startSession delegates to. It must target the
+  // working forge endpoint (/api/v1/forge) — the old `${sharedApiBase}/niuu/volundr`
+  // path is dead in mini-mode and made session create 503. List/stop still work
+  // because they merge primary+aggregate; create only hits the aggregate.
   const aggregateVolundr =
     sharedApiBase != null
-      ? buildVolundrHttpAdapter(createApiClient(`${sharedApiBase}/niuu/volundr`))
+      ? buildVolundrHttpAdapter(createApiClient(`${sharedApiBase}/forge`))
       : null;
   const volundr =
     aggregateVolundr != null

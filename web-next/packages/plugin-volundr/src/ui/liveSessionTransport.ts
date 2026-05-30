@@ -1,7 +1,3 @@
-function isLoopbackHostname(hostname: string): boolean {
-  return hostname === '127.0.0.1' || hostname === 'localhost';
-}
-
 function publicProtocolFor(parsedProtocol: string, currentProtocol: string): string {
   if (parsedProtocol === 'ws:' || parsedProtocol === 'wss:') {
     return currentProtocol === 'https:' ? 'wss:' : 'ws:';
@@ -20,8 +16,15 @@ export function normalizeSessionUrl(url: string | null | undefined): string | nu
     if (typeof window === 'undefined') return parsed.toString();
 
     const current = new URL(window.location.origin);
-    const samePort = parsed.port === current.port;
-    if (isLoopbackHostname(parsed.hostname) && isLoopbackHostname(current.hostname) && samePort) {
+    // Route session traffic (the /s/{id}/… WebSocket and the HTTP base derived
+    // from it) through the page's own origin so the same-origin dev/Tailscale
+    // proxy handles it. The backend advertises chat_endpoint with whatever
+    // host/port it knows — a loopback or the Tailscale IP, e.g.
+    // ws://100.66.123.128:8080/… — which is a different origin from the page
+    // (e.g. thor-host.…:5173) and gets blocked by CORS. Rewrite
+    // host+port+protocol to the current origin unless it is already same-origin.
+    const sameOrigin = parsed.hostname === current.hostname && parsed.port === current.port;
+    if (!sameOrigin) {
       parsed.protocol = publicProtocolFor(parsed.protocol, current.protocol);
       parsed.hostname = current.hostname;
       parsed.port = current.port;
