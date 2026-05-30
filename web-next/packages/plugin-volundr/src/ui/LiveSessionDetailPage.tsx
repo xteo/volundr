@@ -1410,6 +1410,9 @@ export function LiveSessionDetailPage({
   const modelCatalog = modelsQuery.data ?? {};
   const modelInfo = liveSession?.model ? modelCatalog[liveSession.model] : undefined;
   const modelLabel = modelInfo?.name ?? liveSession?.model ?? 'unknown';
+  // Hide debug plumbing (raw session GUID chip, forge/instance label) from the
+  // header unless the operator opts in — same toggle as the session cards.
+  const showDebugMeta = getShowDebugMeta();
   const transcriptTurns = useMemo(() => transcriptQuery.data?.turns ?? [], [transcriptQuery.data]);
   const replayMessages = useMemo(() => transformTurns(transcriptTurns), [transcriptTurns]);
   const replayParticipants = useMemo(
