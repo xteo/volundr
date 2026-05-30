@@ -99,9 +99,13 @@ describe('LaunchWizard helpers', () => {
   it('picks defaults and formats model/integration labels', () => {
     const models: Record<string, VolundrModel> = {
       'gpt-test': { name: 'GPT Test', provider: 'openai', tier: 'fast' },
+      'claude-opus-4-8': { name: 'Opus', provider: 'anthropic', tier: 'smart' },
       'sonnet-primary': { name: 'Sonnet', provider: 'anthropic', tier: 'smart' },
     };
-    expect(pickDefaultModel(models)).toBe('sonnet-primary');
+    // Frontier default wins when present.
+    expect(pickDefaultModel(models)).toBe('claude-opus-4-8');
+    // Falls back to the first catalog entry when the frontier model is absent.
+    expect(pickDefaultModel({ 'gpt-test': models['gpt-test'] })).toBe('gpt-test');
     expect(formatModelOption('gpt-test', models['gpt-test'])).toBe('GPT Test · openai · fast');
     expect(formatModelOption('fallback')).toBe('fallback');
 
