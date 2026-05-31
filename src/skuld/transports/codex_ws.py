@@ -140,6 +140,7 @@ class CodexWebSocketTransport(CLITransport):
         mcp_servers: list[dict] | None = None,
         reasoning_effort: str = "",
         fast_mode: bool = False,
+        resume_session_id: str | None = None,
         **_kwargs: object,
     ) -> None:
         super().__init__()
@@ -147,6 +148,7 @@ class CodexWebSocketTransport(CLITransport):
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._fast_mode = fast_mode
+        self._resume_session_id = (resume_session_id or "").strip() or None
         self._skip_permissions = skip_permissions
         self._approval_policy = approval_policy.strip()
         self._sandbox = sandbox.strip()
@@ -222,7 +224,9 @@ class CodexWebSocketTransport(CLITransport):
             await self._start_fallback_transport(exc)
             return
 
-        if self._initial_prompt:
+        # On resume the prior thread's history is reloaded, so don't replay the
+        # initial prompt (it was already part of that conversation).
+        if self._initial_prompt and not self._resume_session_id:
             await self.send_message(self._initial_prompt)
 
     async def stop(self) -> None:
@@ -411,6 +415,12 @@ class CodexWebSocketTransport(CLITransport):
         logger.info("Codex initialize response: %s", result)
 
         await self._send_notification("initialized")
+
+        # Restart continuity: if we carry a prior thread id, resume it (reloads
+        # the conversation) instead of starting a fresh thread.
+        if self._resume_session_id:
+            await self.resume(self._resume_session_id)
+            return
 
         thread_params: dict = {
             "experimentalRawEvents": False,
@@ -692,8 +702,7 @@ class CodexWebSocketTransport(CLITransport):
                 payload.get("call_id"),
             )
             task_name = (
-                "codex-response-function-"
-                f"{payload.get('call_id') or payload.get('name') or 'call'}"
+                f"codex-response-function-{payload.get('call_id') or payload.get('name') or 'call'}"
             )
             task = asyncio.create_task(
                 self._handle_raw_function_call_item(payload),
@@ -914,8 +923,7 @@ class CodexWebSocketTransport(CLITransport):
         env = args.get("env")
         if isinstance(env, dict):
             exec_params["env"] = {
-                str(key): (str(value) if value is not None else None)
-                for key, value in env.items()
+                str(key): (str(value) if value is not None else None) for key, value in env.items()
             }
 
         result = await self._send_rpc("command/exec", exec_params)

@@ -416,6 +416,14 @@ class Session(BaseModel):
         default="session",
         description="Workload type used to launch the session",
     )
+    cli_session_id: str | None = Field(
+        default=None,
+        description=(
+            "CLI/agent conversation id (Claude session UUID or Codex thread id) "
+            "captured at runtime, used to --resume the prior conversation when the "
+            "session is restarted."
+        ),
+    )
 
     model_config = {"frozen": False}
 
@@ -488,6 +496,15 @@ class Session(BaseModel):
         return self.model_copy(
             update={
                 "error": error,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+
+    def with_cli_session_id(self, cli_session_id: str) -> Session:
+        """Return a copy with the captured CLI/agent conversation id for resume."""
+        return self.model_copy(
+            update={
+                "cli_session_id": cli_session_id,
                 "updated_at": datetime.now(UTC),
             }
         )

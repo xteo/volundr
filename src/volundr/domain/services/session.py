@@ -348,6 +348,13 @@ class SessionService:
         if session is None:
             raise SessionNotFoundError(session_id)
 
+        # The broker rides the CLI/agent conversation id on activity reports.
+        # Persist it as a first-class field (so the session can be --resume'd after
+        # a stop) and keep it OUT of activity_metadata, which is clobbered below.
+        cli_session_id = metadata.pop("cli_session_id", None)
+        if cli_session_id and cli_session_id != session.cli_session_id:
+            session.cli_session_id = cli_session_id
+
         session.activity_state = state
         session.activity_metadata = metadata
         updated = await self._repository.update(session)
@@ -1167,7 +1174,6 @@ def _communication_route_id(
 ) -> UUID:
     """Return a stable route UUID for a session communication target."""
     value = (
-        f"volundr:communication-route:{session_id}:{platform}:"
-        f"{conversation_id}:{thread_id or ''}"
+        f"volundr:communication-route:{session_id}:{platform}:{conversation_id}:{thread_id or ''}"
     )
     return uuid5(NAMESPACE_URL, value)
