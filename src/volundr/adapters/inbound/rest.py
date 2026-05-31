@@ -491,6 +491,10 @@ class SessionResponse(BaseModel):
         default="session",
         description="Workload type used to launch the session",
     )
+    cli_session_id: str | None = Field(
+        default=None,
+        description="Captured CLI/agent conversation id; present once the session is resumable",
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -548,6 +552,7 @@ class SessionResponse(BaseModel):
             activity_state=(session.activity_state.value if session.activity_state else None),
             activity_metadata=session.activity_metadata,
             workload_type=session.workload_type,
+            cli_session_id=session.cli_session_id,
         )
 
 

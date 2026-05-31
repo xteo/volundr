@@ -25,9 +25,10 @@ class PostgresSessionRepository(SessionRepository):
                 (id, name, model, source, status, chat_endpoint, code_endpoint,
                  created_at, updated_at, last_active, message_count, tokens_used,
                  pod_name, error, tracker_issue_id, issue_tracker_url,
-                 preset_id, archived_at, owner_id, tenant_id, workload_type)
+                 preset_id, archived_at, owner_id, tenant_id, workload_type,
+                 cli_session_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                    $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             """,
             session.id,
             session.name,
@@ -50,6 +51,7 @@ class PostgresSessionRepository(SessionRepository):
             session.owner_id,
             session.tenant_id,
             session.workload_type,
+            session.cli_session_id,
         )
         return session
 
@@ -118,7 +120,8 @@ class PostgresSessionRepository(SessionRepository):
                 last_active = $9, message_count = $10, tokens_used = $11,
                 pod_name = $12, error = $13, tracker_issue_id = $14,
                 issue_tracker_url = $15, preset_id = $16, archived_at = $17,
-                owner_id = $18, tenant_id = $19, workload_type = $20
+                owner_id = $18, tenant_id = $19, workload_type = $20,
+                cli_session_id = $21
             WHERE id = $1
             """,
             session.id,
@@ -141,6 +144,7 @@ class PostgresSessionRepository(SessionRepository):
             session.owner_id,
             session.tenant_id,
             session.workload_type,
+            session.cli_session_id,
         )
         return session
 
@@ -192,6 +196,7 @@ class PostgresSessionRepository(SessionRepository):
             owner_id=row.get("owner_id"),
             tenant_id=row.get("tenant_id"),
             workload_type=row.get("workload_type") or "session",
+            cli_session_id=row.get("cli_session_id"),
         )
 
     @staticmethod

@@ -196,6 +196,10 @@ class SkuldSessionConfig(BaseModel):
     initial_prompt: str = Field(default="")
     saga_id: str | None = Field(default=None)
     run_id: str | None = Field(default=None)
+    # Prior CLI/agent conversation id to --resume when this session is restarted
+    # (set by Volundr from the persisted session.cli_session_id via
+    # SKULD__SESSION__RESUME_SESSION_ID). Empty on a fresh session.
+    resume_session_id: str | None = Field(default=None)
 
 
 class ArchiveStoreConfig(BaseModel):
