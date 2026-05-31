@@ -100,7 +100,7 @@ const DEFINITION_RUNES: Record<string, string> = {
   aider: '\u16A8',
 };
 
-const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
+export const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
   {
     key: 'skuldClaude',
     displayName: 'Claude Code',

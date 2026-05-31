@@ -83,7 +83,10 @@ const FIXED_TAB_ORDER: Partial<Record<SessionTab, number>> = {
 };
 
 function isSessionBooting(status: string | null | undefined): boolean {
-  return status === 'starting' || status === 'provisioning';
+  // 'created' is the transient initial state before the backend auto-starts the
+  // session (create_and_start_session); treat it as booting so a freshly-created
+  // session shows "starting…" instead of a "Start the session" dead-end.
+  return status === 'created' || status === 'starting' || status === 'provisioning';
 }
 
 function formatCount(value: number): string {

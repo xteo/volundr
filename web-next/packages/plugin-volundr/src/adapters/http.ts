@@ -20,7 +20,6 @@ import type { IFileSystemPort, FileTreeNode } from '../ports/IFileSystemPort';
 import type {
   VolundrSession,
   VolundrStats,
-  VolundrFeatures,
   VolundrRepo,
   VolundrMessage,
   VolundrLog,
@@ -1336,7 +1335,20 @@ export function buildVolundrHttpAdapter(
   }
 
   return {
-    getFeatures: () => sharedClient.get<VolundrFeatures>('/features'),
+    // Backend exposes GET /api/v1/forge/feature-flags (snake_case). The prior
+    // /features call hit a different (modules) API and never surfaced mini_mode.
+    getFeatures: async () => {
+      const flags = await forgeClient.get<{
+        local_mounts_enabled?: boolean;
+        file_manager_enabled?: boolean;
+        mini_mode?: boolean;
+      }>('/feature-flags');
+      return {
+        localMountsEnabled: Boolean(flags.local_mounts_enabled),
+        fileManagerEnabled: Boolean(flags.file_manager_enabled),
+        miniMode: Boolean(flags.mini_mode),
+      };
+    },
     getSessionDefinitions: async () => {
       const payload = await forgeClient.get<SessionDefinitionPayload[]>('/session-definitions');
       return payload.map(normalizeSessionDefinition);
@@ -1426,7 +1438,9 @@ export function buildVolundrHttpAdapter(
     updateSession: (sessionId, updates) =>
       forgeClient.patch<SessionPayload>(`/sessions/${sessionId}`, updates).then(normalizeSession),
     stopSession: (sessionId) => forgeClient.post<void>(`/sessions/${sessionId}/stop`),
-    resumeSession: (sessionId) => forgeClient.post<void>(`/sessions/${sessionId}/resume`),
+    // Backend exposes /start ("relaunch a stopped or failed session"); there is no
+    // /resume route, so the prior /resume call 404'd. Resume == start a stopped session.
+    resumeSession: (sessionId) => forgeClient.post<void>(`/sessions/${sessionId}/start`),
     deleteSession: (sessionId, cleanup) =>
       forgeClient.delete<void>(`/sessions/${sessionId}`, {
         cleanup: cleanup ?? [],

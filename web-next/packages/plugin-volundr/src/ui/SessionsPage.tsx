@@ -24,6 +24,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { LaunchWizard } from './LaunchWizard';
+import { QuickLaunch } from './QuickLaunch';
+import { useMiniMode } from './useFeatures';
 import { useSessionList } from './hooks/useSessionStore';
 import { groupByState } from './sessions/groupByState';
 import { LiveSessionDetailPage } from './LiveSessionDetailPage';
@@ -534,6 +536,9 @@ export function SessionsPage() {
   const [deleteStoppedOpen, setDeleteStoppedOpen] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [launchOpen, setLaunchOpen] = useState(false);
+  // Mini (local, no-k8s) deployments get the simple Quick Launch; cluster mode
+  // keeps the full LaunchWizard.
+  const miniMode = useMiniMode();
   const [sidebarWidth, setSidebarWidth] = useState<number>(readLeftWidth);
   const [resizing, setResizing] = useState(false);
   const [foldedGroups, setFoldedGroups] = useState<Record<string, boolean>>(readFoldedGroups);
@@ -1130,7 +1135,11 @@ export function SessionsPage() {
           </div>
         </DialogContent>
       </Dialog>
-      <LaunchWizard open={launchOpen} onOpenChange={setLaunchOpen} />
+      {miniMode ? (
+        <QuickLaunch open={launchOpen} onOpenChange={setLaunchOpen} />
+      ) : (
+        <LaunchWizard open={launchOpen} onOpenChange={setLaunchOpen} />
+      )}
     </>
   );
 }
