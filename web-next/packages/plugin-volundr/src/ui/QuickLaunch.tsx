@@ -2,16 +2,9 @@ import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useService } from '@niuulabs/plugin-sdk';
-import {
-  Dialog,
-  DialogContent,
-  Field,
-  Input,
-  RepoSelect,
-  Textarea,
-  type RepoRecord,
-} from '@niuulabs/ui';
+import { Dialog, DialogContent, Field, Input, Textarea } from '@niuulabs/ui';
 import type { IVolundrService } from '../ports/IVolundrService';
+import type { LocalMountSource } from '../models/volundr.model';
 import {
   FALLBACK_SESSION_DEFINITIONS,
   definitionToTaskType,
@@ -21,12 +14,13 @@ import {
   validateSessionName,
 } from './LaunchWizard';
 
-type RepoCatalogService = { getRepos(): Promise<RepoRecord[]> };
-
 export interface QuickLaunchProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
+
+// Mini mode runs in place against a local checkout — only these two engines.
+const ALLOWED_ENGINES = new Set(['skuldClaude', 'skuldCodex']);
 
 const PRIMARY_BTN =
   'niuu-rounded-md niuu-border niuu-border-brand niuu-bg-brand niuu-px-4 niuu-py-2 niuu-text-xs niuu-font-mono niuu-text-bg-primary niuu-cursor-pointer disabled:niuu-opacity-50 disabled:niuu-cursor-not-allowed';
@@ -39,39 +33,39 @@ const ENGINE_BTN_IDLE =
   'niuu-border-border-subtle niuu-bg-bg-primary niuu-text-text-muted hover:niuu-border-brand';
 
 /**
- * Mini-mode session create surface: name + repository + engine, then Go.
+ * Mini-mode session create surface: pick a local folder + an engine, then Go.
  *
- * Deliberately omits the cluster/k8s machinery of the full LaunchWizard
- * (CPU/GPU/memory, cluster targeting, the fake boot animation, MCP/credentials/
- * presets) — none of it applies to a local single-host (LocalProcessPodManager)
- * session. It maps straight onto the working POST /forge/sessions contract and,
- * on success, lands the user in the session view (no "open pod" step).
+ * In mini mode the session runs IN PLACE against a checkout already on disk —
+ * there is no clone — so the source is a local_mount (folder path), not a
+ * git repo/branch. Only Claude Code and Codex are offered. Deliberately omits
+ * the cluster/k8s machinery of the full LaunchWizard (resources, cluster, the
+ * fake boot animation, MCP/credentials/presets). Maps straight onto the working
+ * POST /forge/sessions contract and, on success, lands in the session view.
  */
 export function QuickLaunch({ open, onOpenChange }: QuickLaunchProps) {
   const volundr = useService<IVolundrService>('volundr');
-  const repoCatalog = useService<RepoCatalogService>('niuu.repos');
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
-  const reposQuery = useQuery({
-    queryKey: ['volundr', 'repos'],
-    queryFn: () => repoCatalog.getRepos(),
-    enabled: open,
-  });
   const definitionsQuery = useQuery({
     queryKey: ['volundr', 'session-definitions'],
     queryFn: () => volundr.getSessionDefinitions(),
     enabled: open,
   });
 
-  const repos = reposQuery.data ?? [];
-  const definitions = definitionsQuery.data?.length
-    ? definitionsQuery.data
-    : FALLBACK_SESSION_DEFINITIONS;
+  // Claude + Codex only, in that order.
+  const definitions = useMemo(() => {
+    const all = definitionsQuery.data?.length
+      ? definitionsQuery.data
+      : FALLBACK_SESSION_DEFINITIONS;
+    const allowed = all.filter((d) => ALLOWED_ENGINES.has(d.key));
+    return allowed.length
+      ? allowed
+      : FALLBACK_SESSION_DEFINITIONS.filter((d) => ALLOWED_ENGINES.has(d.key));
+  }, [definitionsQuery.data]);
 
   const [name, setName] = useState('');
-  const [repo, setRepo] = useState('');
-  const [branch, setBranch] = useState('main');
+  const [folder, setFolder] = useState('');
   const [definitionKey, setDefinitionKey] = useState('skuldClaude');
   const [prompt, setPrompt] = useState('');
   const [creating, setCreating] = useState(false);
@@ -82,33 +76,34 @@ export function QuickLaunch({ open, onOpenChange }: QuickLaunchProps) {
     [definitions, definitionKey],
   );
 
-  // Auto-derive a session name from the repo/branch when the user leaves it blank.
+  // Auto-derive the session name from the folder's last path segment when blank.
   const effectiveName = useMemo(() => {
     const explicit = slugifySessionName(name);
     if (explicit) return explicit;
-    const fromRepo = slugifySessionName(
-      (repo || '')
-        .split('/')
-        .at(-1)
-        ?.replace(/\.git$/, '') ?? '',
-    );
-    if (fromRepo) return fromRepo;
-    const fromBranch = slugifySessionName((branch || '').split('/').at(-1) ?? '');
-    return fromBranch || 'forge-session';
-  }, [name, repo, branch]);
+    const lastSegment = (folder || '').split('/').filter(Boolean).at(-1) ?? '';
+    const fromFolder = slugifySessionName(lastSegment.replace(/^~/, 'home'));
+    return fromFolder || 'forge-session';
+  }, [name, folder]);
 
   // Only validate what the user typed; the auto-derived fallback is always valid.
   const nameError = name ? validateSessionName(slugifySessionName(name)) : null;
+  const canCreate = Boolean(folder.trim()) && !nameError && !creating;
 
   async function handleCreate() {
-    if (creating) return;
+    if (!canCreate) return;
     setError(null);
     setCreating(true);
     try {
       const def = selectedDef;
+      const path = folder.trim();
+      const source: LocalMountSource = {
+        type: 'local_mount',
+        local_path: path,
+        paths: [{ host_path: path, mount_path: '/workspace', read_only: false }],
+      };
       const session = await volundr.startSession({
         name: effectiveName,
-        source: { type: 'git', repo: repo.trim(), branch: (branch || 'main').trim() },
+        source,
         model: def?.defaultModel ?? '',
         definition: def?.key,
         taskType: def ? definitionToTaskType(def.key) : undefined,
@@ -138,8 +133,20 @@ export function QuickLaunch({ open, onOpenChange }: QuickLaunchProps) {
       <DialogContent title="New session">
         <div className="niuu-flex niuu-flex-col niuu-gap-4" data-testid="quick-launch">
           <Field
+            label="Folder"
+            hint="Absolute path to a local checkout — the session runs in place, no clone"
+          >
+            <Input
+              value={folder}
+              onChange={(e) => setFolder(e.target.value)}
+              placeholder="/home/thor/repos/lexi-frontend"
+              data-testid="quick-launch-folder"
+            />
+          </Field>
+
+          <Field
             label="Name"
-            hint="Optional — derived from the repository if left blank"
+            hint="Optional — derived from the folder if left blank"
             error={nameError ?? undefined}
           >
             <Input
@@ -147,38 +154,6 @@ export function QuickLaunch({ open, onOpenChange }: QuickLaunchProps) {
               onChange={(e) => setName(e.target.value)}
               placeholder={effectiveName}
               data-testid="quick-launch-name"
-            />
-          </Field>
-
-          <Field label="Repository">
-            {repos.length > 0 ? (
-              <RepoSelect
-                repos={repos}
-                value={repo}
-                onChange={(value) => {
-                  const r = repos.find((item) => item.cloneUrl === value);
-                  setRepo(value);
-                  if (r?.defaultBranch) setBranch(r.defaultBranch);
-                }}
-                placeholder="Select repository"
-                testId="quick-launch-repo"
-              />
-            ) : (
-              <Input
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                placeholder="github.com/owner/repo"
-                data-testid="quick-launch-repo"
-              />
-            )}
-          </Field>
-
-          <Field label="Branch">
-            <Input
-              value={branch}
-              onChange={(e) => setBranch(e.target.value)}
-              placeholder="main"
-              data-testid="quick-launch-branch"
             />
           </Field>
 
@@ -231,7 +206,7 @@ export function QuickLaunch({ open, onOpenChange }: QuickLaunchProps) {
             <button
               type="button"
               onClick={() => void handleCreate()}
-              disabled={creating || Boolean(nameError)}
+              disabled={!canCreate}
               data-testid="quick-launch-go"
               className={PRIMARY_BTN}
             >
