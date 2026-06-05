@@ -20,13 +20,15 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from skuld.effort import normalize_effort
 
 
 # Config file search paths (in order of priority).
@@ -193,8 +195,17 @@ class SkuldSessionConfig(BaseModel):
     workspace_dir: str | None = Field(default=None)
     system_prompt: str = Field(default="")
     initial_prompt: str = Field(default="")
+    # Reasoning effort the agent runs at: low | medium | high | max (Anthropic
+    # `effort` param; Codex `reasoning_effort`). Defaults to max so new sessions
+    # think hardest unless told otherwise. Changeable mid-session via /effort.
+    effort: str = Field(default="max")
     saga_id: str | None = Field(default=None)
     run_id: str | None = Field(default=None)
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _normalize_effort(cls, value: object) -> str:
+        return normalize_effort(value)
 
 
 class ArchiveStoreConfig(BaseModel):

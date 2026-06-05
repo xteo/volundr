@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,6 +52,7 @@ from skuld.channels import (
 )
 from skuld.chronicle_watcher import ChronicleWatcher
 from skuld.config import SkuldSettings
+from skuld.effort import EFFORT_LEVELS, codex_reasoning_effort, normalize_effort
 from skuld.room_bridge import RoomBridge
 from skuld.room_mesh_bridge import RoomMeshBridge
 from skuld.service_manager import (
@@ -135,6 +136,26 @@ def _non_empty_str(value: object) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
+# `/effort` or `/effort <level>` (the in-session reasoning-effort slash command).
+_EFFORT_COMMAND_RE = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
+
+
+def _parse_effort_command(message: object) -> str | None:
+    """Parse a `/effort [level]` slash command.
+
+    Returns ``None`` when the message is NOT an /effort command (send it to the
+    model). Returns a recognized level to set, or ``""`` for a bare `/effort`
+    (or unknown arg) meaning "report the current level / show usage".
+    """
+    if not isinstance(message, str):
+        return None
+    m = _EFFORT_COMMAND_RE.match(message.strip())
+    if not m:
+        return None
+    arg = (m.group(1) or "").strip().lower()
+    return arg if arg in EFFORT_LEVELS else ""
+
+
 def _describe_browser_content_block(block: dict[str, Any]) -> str | None:
     """Return a short human-readable description for a browser content block."""
     block_type = str(block.get("type") or "").strip()
@@ -183,9 +204,7 @@ def _normalize_browser_message_content(content: object) -> str:
             f"{count} {label}" if count != 1 else f"1 {label}"
             for label, count in sorted(counts.items())
         )
-        lines.append(
-            f"[User attached {attachment_summary}. This transport forwards text only.]"
-        )
+        lines.append(f"[User attached {attachment_summary}. This transport forwards text only.]")
     return "\n\n".join(lines).strip()
 
 
@@ -206,6 +225,8 @@ _GIT_COMMIT_PREFIXES = ("git commit", "git -c ", "git -C ")
 
 # Matches git commit output like: [main e4f7a21] fix: some message
 _GIT_COMMIT_OUTPUT_RE = re.compile(r"\[[\w/-]+\s+([a-f0-9]{7,})\]\s+(.+)")
+
+
 def _is_git_commit(cmd: str) -> bool:
     """Return True if a Bash command is a git commit invocation."""
     stripped = cmd.lstrip()
@@ -697,9 +718,12 @@ def _workflow_gate_nodes(graph: dict[str, Any] | None) -> list[WorkflowGateNode]
                 else "gate.changes_requested",
             ),
         )
-        pending_behavior = str(
-            node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
-        ).strip() or "help_needed"
+        pending_behavior = (
+            str(
+                node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
+            ).strip()
+            or "help_needed"
+        )
         mode = str(node.get("mode") or "human_approval").strip() or "human_approval"
         instructions = str(node.get("instructions") or "").strip()
 
@@ -1348,9 +1372,7 @@ class Broker:
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         missing = {
-            peer_id
-            for peer_id in required_peers
-            if not self._room_bridge.is_connected(peer_id)
+            peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
         }
         if missing:
             logger.info(
@@ -1363,9 +1385,7 @@ class Broker:
         while missing and time.monotonic() < deadline:
             await asyncio.sleep(poll_interval_s)
             missing = {
-                peer_id
-                for peer_id in required_peers
-                if not self._room_bridge.is_connected(peer_id)
+                peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
             }
 
         if missing:
@@ -1405,9 +1425,7 @@ class Broker:
             wait_timeout_s,
         )
         if not consumers_ready:
-            raise RuntimeError(
-                f"workflow trigger consumers for {cfg.event_type} did not connect"
-            )
+            raise RuntimeError(f"workflow trigger consumers for {cfg.event_type} did not connect")
 
         delay_s = max(0.0, float(cfg.startup_delay_s or 0.0))
         if delay_s and not self._workflow_trigger_consumer_peer_ids(cfg.event_type):
@@ -1495,6 +1513,11 @@ class Broker:
                 "" if self._has_workflow_trigger() else self._settings.session.initial_prompt
             ),
             "mcp_servers": self._settings.mcp_servers,
+            # Reasoning effort: Claude transports take `effort`; Codex takes
+            # `reasoning_effort` (max -> high). The factory signature-filters, so
+            # each transport gets only the kwarg it accepts.
+            "effort": self._settings.session.effort,
+            "reasoning_effort": codex_reasoning_effort(self._settings.session.effort),
         }
 
     def _create_transport(self) -> CLITransport:
@@ -1616,9 +1639,7 @@ class Broker:
         if self._settings.mesh.enabled:
             await self._start_mesh_adapter()
             if self._has_workflow_trigger():
-                self._workflow_trigger_task = asyncio.create_task(
-                    self._run_workflow_trigger_task()
-                )
+                self._workflow_trigger_task = asyncio.create_task(self._run_workflow_trigger_task())
         elif self._has_workflow_trigger():
             logger.warning("Workflow trigger configured but mesh is disabled — skipping dispatch")
 
@@ -2093,10 +2114,7 @@ class Broker:
             or f"{state.label} is waiting for human approval before the workflow can continue.",
             "reason": "needs_human_approval",
             "recommendation": state.condition
-            or (
-                "Review the pending gate and decide whether to approve "
-                "or request changes."
-            ),
+            or ("Review the pending gate and decide whether to approve or request changes."),
             "context": {
                 "gate_id": state.id,
                 "gate_label": state.label,
@@ -2810,8 +2828,8 @@ class Broker:
         if event_type == "control_request":
             self._track_pending_permission_request(data)
 
-        tool_result_only_user_event = (
-            event_type == "user" and self._is_tool_result_only_user_event(data)
+        tool_result_only_user_event = event_type == "user" and self._is_tool_result_only_user_event(
+            data
         )
         suppress_channel_broadcast = (
             event_type in {"user", "assistant", "content_block_delta", "result"}
@@ -3146,10 +3164,55 @@ class Broker:
         "steer_active_turn": "steer",
         "set_model": "set_model",
         "set_max_thinking_tokens": "set_thinking_tokens",
+        "set_effort": "set_effort",
         "set_permission_mode": "set_permission_mode",
         "rewind_files": "rewind_files",
         "mcp_set_servers": "mcp_set_servers",
     }
+
+    async def _apply_effort_change(
+        self,
+        level: str,
+        sender_ws: WebSocket | None = None,
+    ) -> None:
+        """Apply (or report) a reasoning-effort change for the live session.
+
+        `level` is "" to just report the current effort + usage; otherwise a
+        validated level. Updates the session config (so it survives reconnects)
+        and forwards a `set_effort` control to the transport, then broadcasts a
+        system note so every viewer sees the change.
+        """
+        current = self._settings.session.effort
+        if not level:
+            await self._broadcast_effort_note(
+                f"Effort is **{current}**. Usage: `/effort {'|'.join(EFFORT_LEVELS)}`",
+                effort=current,
+            )
+            return
+
+        supported = bool(
+            self._transport and getattr(self._transport.capabilities, "set_effort", False)
+        )
+        if not supported:
+            await self._broadcast_effort_note(
+                f"This agent can't change effort mid-session (effort stays **{current}**).",
+                effort=current,
+            )
+            return
+
+        self._settings.session.effort = level
+        try:
+            await self._transport.send_control("set_effort", effort=level)
+        except Exception:
+            logger.warning("set_effort control failed", exc_info=True)
+        await self._broadcast_effort_note(f"Effort set to **{level}**.", effort=level)
+
+    async def _broadcast_effort_note(self, text: str, *, effort: str) -> None:
+        """Broadcast a system note about the effort level to all channels."""
+        with suppress(Exception):
+            await self._channels.broadcast(
+                {"type": "system", "subtype": "effort", "effort": effort, "content": text}
+            )
 
     async def _dispatch_browser_message(
         self,
@@ -3218,6 +3281,10 @@ class Broker:
                     max_thinking_tokens=tokens,
                 )
 
+            # Change reasoning effort mid-session (low | medium | high | max).
+            case "set_effort":
+                await self._apply_effort_change(normalize_effort(data.get("effort")), sender_ws)
+
             # Per-channel filter: hide/show tool_use + tool_result blocks
             case "set_internal_visibility":
                 visible = bool(data.get("visible", False))
@@ -3274,6 +3341,14 @@ class Broker:
             case _:
                 message = data.get("content", "")
                 if not message:
+                    return
+
+                # Recognize the `/effort [level]` slash command inline (so it works
+                # even on transports without full slash-command support) and apply
+                # it instead of sending it to the model.
+                effort_level = _parse_effort_command(message)
+                if effort_level is not None:
+                    await self._apply_effort_change(effort_level, sender_ws)
                     return
 
                 if self._is_room_only_workflow_session():
@@ -4092,9 +4167,7 @@ class Broker:
     ) -> tuple[uuid.UUID | None, str]:
         """Pop a pending assistant tool span by id, falling back to FIFO order."""
         tool_key = (
-            tool_use_id
-            if tool_use_id and tool_use_id in self._trace_assistant_tool_spans
-            else ""
+            tool_use_id if tool_use_id and tool_use_id in self._trace_assistant_tool_spans else ""
         )
         if not tool_key and self._trace_assistant_tool_order:
             tool_key = self._trace_assistant_tool_order[0]

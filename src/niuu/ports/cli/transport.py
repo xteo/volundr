@@ -21,6 +21,7 @@ class TransportCapabilities:
     steering_mode: str = "none"
     set_model: bool = False
     set_thinking_tokens: bool = False
+    set_effort: bool = False
     set_permission_mode: bool = False
     rewind_files: bool = False
     mcp_set_servers: bool = False

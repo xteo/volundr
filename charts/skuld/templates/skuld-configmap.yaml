@@ -12,6 +12,7 @@ data:
       id: {{ .Values.session.id | quote }}
       name: {{ .Values.session.name | quote }}
       model: {{ .Values.session.model | quote }}
+      effort: {{ .Values.session.effort | default "max" | quote }}
       {{- if .Values.session.systemPrompt }}
       system_prompt: {{ .Values.session.systemPrompt | quote }}
       {{- end }}

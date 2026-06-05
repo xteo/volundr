@@ -40,6 +40,7 @@ from claude_agent_sdk.types import (
 
 from niuu.adapters.cli.runtime import filter_cli_event as _filter_event
 from niuu.ports.cli import CLITransport, TransportCapabilities
+from skuld.effort import normalize_effort
 from skuld.transports.mcp_config import build_sdk_mcp_servers
 from skuld.transports.tool_shims import ensure_codex_tool_shims
 
@@ -252,10 +253,13 @@ class SDKTransport(CLITransport):
         initial_prompt: str = "",
         mcp_servers: list[dict] | None = None,
         turn_timeout_s: float = _DEFAULT_TURN_TIMEOUT_S,
+        effort: str = "",
+        **_kwargs: object,
     ) -> None:
         super().__init__()
         self.workspace_dir = workspace_dir
         self._model = model
+        self._effort = normalize_effort(effort) if effort else ""
         self._skip_permissions = skip_permissions
         self._agent_teams = agent_teams
         self._system_prompt = system_prompt
@@ -281,6 +285,7 @@ class SDKTransport(CLITransport):
             steer=True,
             steering_mode="interrupt_resume",
             set_model=True,
+            set_effort=True,
             set_permission_mode=True,
         )
 
@@ -461,6 +466,30 @@ class SDKTransport(CLITransport):
                 await client.set_model(model or None)
             return
 
+        if subtype == "set_effort":
+            effort = kwargs.get("effort")
+            if not isinstance(effort, str) or not effort:
+                return
+            normalized = normalize_effort(effort)
+            if normalized == self._effort:
+                return
+            self._effort = normalized
+            # The SDK client has no live set_effort; effort is fixed at connect.
+            # Reconnect (resuming the captured session id) so the new effort takes
+            # hold while preserving the conversation. Skip mid-turn — it applies on
+            # the next (re)connect. Best-effort: a failed reconnect leaves the
+            # session usable on the next turn via `send_message`'s ensure-connect.
+            if self._turn_active:
+                logger.info("Claude SDK transport: effort -> %s (applies next turn)", normalized)
+                return
+            logger.info("Claude SDK transport: effort -> %s (reconnecting)", normalized)
+            try:
+                await self.stop()
+                await self._connect_client(resume=True)
+            except Exception:
+                logger.warning("Claude SDK transport: effort reconnect failed", exc_info=True)
+            return
+
         if subtype == "set_permission_mode":
             mode = kwargs.get("permissionMode")
             if isinstance(mode, str) and mode:
@@ -501,7 +530,7 @@ class SDKTransport(CLITransport):
             await client.interrupt()
             return
 
-    async def _connect_client(self) -> None:
+    async def _connect_client(self, *, resume: bool = False) -> None:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         if self._agent_teams:
             env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
@@ -521,6 +550,14 @@ class SDKTransport(CLITransport):
             "thinking": {"type": "adaptive", "display": "summarized"},
             "env": env,
         }
+        # Reasoning effort (Anthropic `effort` param). Combined with adaptive
+        # thinking above; at high/max the agent almost always thinks.
+        if self._effort:
+            option_kwargs["effort"] = self._effort
+        # Resume the prior SDK session when reconnecting (e.g. after /effort), so
+        # an effort change keeps the conversation context instead of starting over.
+        if resume and self._session_id:
+            option_kwargs["resume"] = self._session_id
         if self._skip_permissions:
             option_kwargs["permission_mode"] = _DEFAULT_PERMISSION_MODE
         options = ClaudeAgentOptions(**option_kwargs)
