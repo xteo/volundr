@@ -236,3 +236,88 @@ class TestConversationHistoryEndpoint:
         assert data["turns"][0]["content"] == "Hello"
         assert data["turns"][1]["role"] == "assistant"
         assert data["turns"][1]["metadata"]["model"] == "claude-sonnet-4-20250514"
+
+
+class TestToolCallsSerialized:
+    """Tool calls + reasoning must be persisted in the saved conversation turn
+    (so a reloaded session shows tool cards, not just text)."""
+
+    @pytest.fixture
+    def brk(self, tmp_path):
+        settings = SkuldSettings(
+            session={"id": "tool-ser", "workspace_dir": str(tmp_path)},
+            transport="subprocess",
+        )
+        return Broker(settings=settings)
+
+    @pytest.mark.asyncio
+    async def test_assistant_tool_cycle_persists_parts(self, brk):
+        # 1) assistant message that thinks + calls a tool (no final text yet)
+        await brk._handle_cli_event(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "let me check the file"},
+                        {
+                            "type": "tool_use",
+                            "id": "tu1",
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        },
+                    ]
+                },
+            }
+        )
+        # 2) tool_result comes back as a user-role message (must NOT flush the turn)
+        await brk._handle_cli_event(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu1",
+                            "content": "a.txt\nb.txt",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            }
+        )
+        # 3) assistant final answer text
+        await brk._handle_cli_event(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Two files."}]}}
+        )
+        # 4) a real user turn flushes the assistant turn
+        await brk._handle_cli_event({"type": "user", "message": {"content": "thanks"}})
+
+        assistant_turns = [t for t in brk._conversation_turns if t.role == "assistant"]
+        assert len(assistant_turns) == 1
+        turn = assistant_turns[0]
+        types = [p.get("type") for p in turn.parts]
+        assert "tool_use" in types
+        assert "tool_result" in types
+        assert "text" in types
+        tu = next(p for p in turn.parts if p["type"] == "tool_use")
+        assert tu["id"] == "tu1" and tu["name"] == "Bash" and tu["input"] == {"command": "ls"}
+        tr = next(p for p in turn.parts if p["type"] == "tool_result")
+        assert tr["tool_use_id"] == "tu1" and tr["content"] == "a.txt\nb.txt"
+        assert turn.content == "Two files."
+
+    @pytest.mark.asyncio
+    async def test_tool_only_turn_persists_even_without_text(self, brk):
+        await brk._handle_cli_event(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "x", "name": "Read", "input": {"file_path": "a"}}
+                    ]
+                },
+            }
+        )
+        brk._flush_pending_assistant_turn()
+        turns = [t for t in brk._conversation_turns if t.role == "assistant"]
+        assert len(turns) == 1
+        assert any(p.get("type") == "tool_use" for p in turns[0].parts)

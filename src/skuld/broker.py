@@ -183,9 +183,7 @@ def _normalize_browser_message_content(content: object) -> str:
             f"{count} {label}" if count != 1 else f"1 {label}"
             for label, count in sorted(counts.items())
         )
-        lines.append(
-            f"[User attached {attachment_summary}. This transport forwards text only.]"
-        )
+        lines.append(f"[User attached {attachment_summary}. This transport forwards text only.]")
     return "\n\n".join(lines).strip()
 
 
@@ -206,6 +204,8 @@ _GIT_COMMIT_PREFIXES = ("git commit", "git -c ", "git -C ")
 
 # Matches git commit output like: [main e4f7a21] fix: some message
 _GIT_COMMIT_OUTPUT_RE = re.compile(r"\[[\w/-]+\s+([a-f0-9]{7,})\]\s+(.+)")
+
+
 def _is_git_commit(cmd: str) -> bool:
     """Return True if a Bash command is a git commit invocation."""
     stripped = cmd.lstrip()
@@ -697,9 +697,12 @@ def _workflow_gate_nodes(graph: dict[str, Any] | None) -> list[WorkflowGateNode]
                 else "gate.changes_requested",
             ),
         )
-        pending_behavior = str(
-            node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
-        ).strip() or "help_needed"
+        pending_behavior = (
+            str(
+                node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
+            ).strip()
+            or "help_needed"
+        )
         mode = str(node.get("mode") or "human_approval").strip() or "human_approval"
         instructions = str(node.get("instructions") or "").strip()
 
@@ -1112,7 +1115,9 @@ class Broker:
     def _flush_pending_assistant_turn(self, metadata: dict | None = None) -> None:
         """Save any accumulated assistant content as a conversation turn."""
         content = self._pending_assistant_content
-        if not content:
+        # Save when there's text OR captured parts (tool_use/tool_result/reasoning)
+        # — a tool-only assistant turn (no prose) must still persist its tool cards.
+        if not content and not self._pending_assistant_parts:
             return
 
         # Flush remaining reasoning
@@ -1348,9 +1353,7 @@ class Broker:
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         missing = {
-            peer_id
-            for peer_id in required_peers
-            if not self._room_bridge.is_connected(peer_id)
+            peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
         }
         if missing:
             logger.info(
@@ -1363,9 +1366,7 @@ class Broker:
         while missing and time.monotonic() < deadline:
             await asyncio.sleep(poll_interval_s)
             missing = {
-                peer_id
-                for peer_id in required_peers
-                if not self._room_bridge.is_connected(peer_id)
+                peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
             }
 
         if missing:
@@ -1405,9 +1406,7 @@ class Broker:
             wait_timeout_s,
         )
         if not consumers_ready:
-            raise RuntimeError(
-                f"workflow trigger consumers for {cfg.event_type} did not connect"
-            )
+            raise RuntimeError(f"workflow trigger consumers for {cfg.event_type} did not connect")
 
         delay_s = max(0.0, float(cfg.startup_delay_s or 0.0))
         if delay_s and not self._workflow_trigger_consumer_peer_ids(cfg.event_type):
@@ -1616,9 +1615,7 @@ class Broker:
         if self._settings.mesh.enabled:
             await self._start_mesh_adapter()
             if self._has_workflow_trigger():
-                self._workflow_trigger_task = asyncio.create_task(
-                    self._run_workflow_trigger_task()
-                )
+                self._workflow_trigger_task = asyncio.create_task(self._run_workflow_trigger_task())
         elif self._has_workflow_trigger():
             logger.warning("Workflow trigger configured but mesh is disabled — skipping dispatch")
 
@@ -2093,10 +2090,7 @@ class Broker:
             or f"{state.label} is waiting for human approval before the workflow can continue.",
             "reason": "needs_human_approval",
             "recommendation": state.condition
-            or (
-                "Review the pending gate and decide whether to approve "
-                "or request changes."
-            ),
+            or ("Review the pending gate and decide whether to approve or request changes."),
             "context": {
                 "gate_id": state.id,
                 "gate_label": state.label,
@@ -2810,8 +2804,8 @@ class Broker:
         if event_type == "control_request":
             self._track_pending_permission_request(data)
 
-        tool_result_only_user_event = (
-            event_type == "user" and self._is_tool_result_only_user_event(data)
+        tool_result_only_user_event = event_type == "user" and self._is_tool_result_only_user_event(
+            data
         )
         suppress_channel_broadcast = (
             event_type in {"user", "assistant", "content_block_delta", "result"}
@@ -2911,6 +2905,24 @@ class Broker:
                 )
         elif tool_result_only_user_event:
             await self._finish_assistant_tool_trace_spans_from_user_event(data)
+            # Persist tool_result blocks onto the open assistant turn so the saved
+            # conversation carries tool OUTPUT (not just the call) for read-back.
+            tr_msg = data.get("message", {})
+            tr_blocks = tr_msg.get("content", []) if isinstance(tr_msg, dict) else []
+            for tr_block in tr_blocks or []:
+                if (
+                    isinstance(tr_block, dict)
+                    and tr_block.get("type") == "tool_result"
+                    and tr_block.get("tool_use_id")
+                ):
+                    self._pending_assistant_parts.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tr_block.get("tool_use_id"),
+                            "content": tr_block.get("content"),
+                            "is_error": bool(tr_block.get("is_error")),
+                        }
+                    )
         elif event_type == "result":
             asyncio.create_task(self._report_activity_state("idle"))
             if self._pending_explicit_human_response_count == 0:
@@ -2922,30 +2934,44 @@ class Broker:
         # We also handle the HTTP streaming format (content_block_delta, result)
         # for backward compatibility.
         if event_type == "assistant":
-            # Extract content from the assistant message
+            # Extract content and ACCUMULATE parts across the messages of one turn
+            # (a tool_use message, then the final text), so the SAVED conversation
+            # turn carries tool calls + reasoning — not just text — and reloads with
+            # its tool cards. Parts are reset on flush, not per message.
             message = data.get("message", {})
             content_blocks = message.get("content", [])
             if isinstance(content_blocks, list) and content_blocks:
                 text_parts = []
-                reasoning_parts = []
                 for block in content_blocks:
                     if not isinstance(block, dict):
                         continue
-                    if block.get("type") == "text" and block.get("text"):
+                    btype = block.get("type")
+                    if btype == "text" and block.get("text"):
                         text_parts.append(block["text"])
-                    elif block.get("type") == "thinking" and block.get("thinking"):
-                        reasoning_parts.append(block["thinking"])
+                        self._pending_assistant_parts.append(
+                            {"type": "text", "text": block["text"]}
+                        )
+                    elif btype == "thinking" and block.get("thinking"):
+                        # Keep last 500 chars per reasoning block as a summary.
+                        self._pending_assistant_parts.append(
+                            {"type": "reasoning", "text": str(block["thinking"])[-500:]}
+                        )
+                    elif btype == "tool_use" and block.get("id"):
+                        self._pending_assistant_parts.append(
+                            {
+                                "type": "tool_use",
+                                "id": block.get("id"),
+                                "name": block.get("name"),
+                                "input": block.get("input") or {},
+                            }
+                        )
                 text_content = "\n".join(text_parts)
                 if text_content:
-                    self._pending_assistant_content = text_content
-                    self._pending_assistant_parts = []
-                    if reasoning_parts:
-                        # Keep last 500 chars of reasoning as summary
-                        combined = "\n".join(reasoning_parts)
-                        self._pending_assistant_parts.append(
-                            {"type": "reasoning", "text": combined[-500:]}
-                        )
-                    self._pending_assistant_parts.append({"type": "text", "text": text_content})
+                    self._pending_assistant_content = (
+                        f"{self._pending_assistant_content}\n{text_content}"
+                        if self._pending_assistant_content
+                        else text_content
+                    )
 
         # HTTP streaming format: accumulate deltas
         if event_type == "content_block_delta":
@@ -4092,9 +4118,7 @@ class Broker:
     ) -> tuple[uuid.UUID | None, str]:
         """Pop a pending assistant tool span by id, falling back to FIFO order."""
         tool_key = (
-            tool_use_id
-            if tool_use_id and tool_use_id in self._trace_assistant_tool_spans
-            else ""
+            tool_use_id if tool_use_id and tool_use_id in self._trace_assistant_tool_spans else ""
         )
         if not tool_key and self._trace_assistant_tool_order:
             tool_key = self._trace_assistant_tool_order[0]
