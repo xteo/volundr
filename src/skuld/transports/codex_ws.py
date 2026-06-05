@@ -146,7 +146,9 @@ class CodexWebSocketTransport(CLITransport):
         super().__init__()
         self.workspace_dir = workspace_dir
         self._model = model
-        self._reasoning_effort = reasoning_effort
+        # Default Codex to HIGH reasoning effort when none is specified — push new
+        # sessions to think hard by default (Codex has no `max` tier).
+        self._reasoning_effort = reasoning_effort or "high"
         self._fast_mode = fast_mode
         self._resume_session_id = (resume_session_id or "").strip() or None
         self._skip_permissions = skip_permissions
