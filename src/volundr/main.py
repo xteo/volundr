@@ -51,6 +51,7 @@ from volundr.adapters.inbound.rest_profiles import create_profiles_router
 from volundr.adapters.inbound.rest_prompts import create_prompts_router
 from volundr.adapters.inbound.rest_resources import create_resources_router
 from volundr.adapters.inbound.rest_secrets import create_canonical_secrets_router
+from volundr.adapters.inbound.rest_session_log import create_session_log_router
 from volundr.adapters.inbound.rest_trace import create_trace_router
 from volundr.adapters.inbound.rest_tracker import create_canonical_tracker_router
 from volundr.adapters.outbound.bifrost_catalog_http import HttpBifrostCatalogAdapter
@@ -62,6 +63,7 @@ from volundr.adapters.outbound.git_registry import create_git_registry
 from volundr.adapters.outbound.linear import LinearAdapter
 from volundr.adapters.outbound.memory_secrets import InMemorySecretManager
 from volundr.adapters.outbound.pg_event_sink import PostgresEventSink
+from volundr.adapters.outbound.pg_session_event_log import PostgresSessionEventLog
 from volundr.adapters.outbound.postgres import PostgresSessionRepository
 from volundr.adapters.outbound.postgres_chronicles import PostgresChronicleRepository
 from volundr.adapters.outbound.postgres_communication_cursors import (
@@ -953,6 +955,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 prefix="/api/v1/forge",
             )
             app.include_router(events_router)
+
+            # Durable full-fidelity transcript log: ingest (skuld) + cursor replay
+            session_event_log = PostgresSessionEventLog(pool)
+            session_log_router = create_session_log_router(
+                session_event_log,
+                session_service=session_service,
+                prefix="/api/v1/forge",
+            )
+            app.include_router(session_log_router)
+
             trace_router = create_trace_router(
                 span_repository,
                 session_service=session_service,
