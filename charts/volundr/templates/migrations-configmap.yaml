@@ -1179,7 +1179,7 @@ data:
     ALTER TABLE volundr_launch_specs DROP COLUMN IF EXISTS session_definition;
 
     ALTER TABLE volundr_launch_specs RENAME TO volundr_presets;
-  000044_session_event_log.up.sql: |
+  000046_session_event_log.up.sql: |
     -- Durable, append-only, full-fidelity per-session event log. Preserves the
     -- complete agent output (text, thinking, tool_use, tool_result, deltas)
     -- ordered by a monotonic per-session `seq` so any client can replay the full
@@ -1203,7 +1203,7 @@ data:
 
     CREATE INDEX IF NOT EXISTS idx_session_event_log_request
         ON session_event_log(session_id, request_id);
-  000044_session_event_log.down.sql: |
+  000046_session_event_log.down.sql: |
     DROP INDEX IF EXISTS idx_session_event_log_request;
     DROP INDEX IF EXISTS idx_session_event_log_session_seq;
     DROP TABLE IF EXISTS session_event_log;
