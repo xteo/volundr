@@ -178,9 +178,7 @@ def _normalize_browser_message_content(content: object) -> str:
             f"{count} {label}" if count != 1 else f"1 {label}"
             for label, count in sorted(counts.items())
         )
-        lines.append(
-            f"[User attached {attachment_summary}. This transport forwards text only.]"
-        )
+        lines.append(f"[User attached {attachment_summary}. This transport forwards text only.]")
     return "\n\n".join(lines).strip()
 
 
@@ -201,6 +199,8 @@ _GIT_COMMIT_PREFIXES = ("git commit", "git -c ", "git -C ")
 
 # Matches git commit output like: [main e4f7a21] fix: some message
 _GIT_COMMIT_OUTPUT_RE = re.compile(r"\[[\w/-]+\s+([a-f0-9]{7,})\]\s+(.+)")
+
+
 def _is_git_commit(cmd: str) -> bool:
     """Return True if a Bash command is a git commit invocation."""
     stripped = cmd.lstrip()
@@ -692,9 +692,12 @@ def _workflow_gate_nodes(graph: dict[str, Any] | None) -> list[WorkflowGateNode]
                 else "gate.changes_requested",
             ),
         )
-        pending_behavior = str(
-            node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
-        ).strip() or "help_needed"
+        pending_behavior = (
+            str(
+                node.get("pendingBehavior") or node.get("pending_behavior") or "help_needed"
+            ).strip()
+            or "help_needed"
+        )
         mode = str(node.get("mode") or "human_approval").strip() or "human_approval"
         instructions = str(node.get("instructions") or "").strip()
 
@@ -978,6 +981,15 @@ class Broker:
         self._flock_completion_reported = False
         self._session_start_reported = False
         self._event_sequence = 0
+        # Durable full-fidelity event log (session_event_log). Every CLI frame is
+        # buffered here and flushed to Volundr by a background worker, independent
+        # of any attached channel — so nothing is dropped when no client is
+        # connected, and any client can replay the full transcript from a cursor.
+        self._event_log_seq = 0
+        self._event_log_buffer: list[dict] = []
+        self._event_log_lock = asyncio.Lock()
+        self._event_log_task: asyncio.Task[None] | None = None
+        self._event_log_stopping = False
         self._activity_state: str = "idle"
         self._last_activity_report: float = 0.0
         self._conversation_turns: list[ConversationTurn] = []
@@ -1105,7 +1117,9 @@ class Broker:
     def _flush_pending_assistant_turn(self, metadata: dict | None = None) -> None:
         """Save any accumulated assistant content as a conversation turn."""
         content = self._pending_assistant_content
-        if not content:
+        # Save when there's text OR captured parts (tool_use/tool_result/reasoning)
+        # — a tool-only assistant turn (no prose) must still persist its tool cards.
+        if not content and not self._pending_assistant_parts:
             return
 
         # Flush remaining reasoning
@@ -1341,9 +1355,7 @@ class Broker:
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         missing = {
-            peer_id
-            for peer_id in required_peers
-            if not self._room_bridge.is_connected(peer_id)
+            peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
         }
         if missing:
             logger.info(
@@ -1356,9 +1368,7 @@ class Broker:
         while missing and time.monotonic() < deadline:
             await asyncio.sleep(poll_interval_s)
             missing = {
-                peer_id
-                for peer_id in required_peers
-                if not self._room_bridge.is_connected(peer_id)
+                peer_id for peer_id in required_peers if not self._room_bridge.is_connected(peer_id)
             }
 
         if missing:
@@ -1398,9 +1408,7 @@ class Broker:
             wait_timeout_s,
         )
         if not consumers_ready:
-            raise RuntimeError(
-                f"workflow trigger consumers for {cfg.event_type} did not connect"
-            )
+            raise RuntimeError(f"workflow trigger consumers for {cfg.event_type} did not connect")
 
         delay_s = max(0.0, float(cfg.startup_delay_s or 0.0))
         if delay_s and not self._workflow_trigger_consumer_peer_ids(cfg.event_type):
@@ -1488,6 +1496,10 @@ class Broker:
                 "" if self._has_workflow_trigger() else self._settings.session.initial_prompt
             ),
             "mcp_servers": self._settings.mcp_servers,
+            # Prior CLI/agent conversation id to --resume on a restart (empty/None
+            # on a fresh session). _create_transport filters by ctor signature, so
+            # transports that don't accept it simply ignore it.
+            "resume_session_id": self._settings.session.resume_session_id,
         }
 
     def _create_transport(self) -> CLITransport:
@@ -1589,6 +1601,9 @@ class Broker:
             asyncio.create_task(self._chronicle_watcher.start())
             logger.info("Chronicle watcher started for %s", watch_dir)
 
+        # Start the durable event-log worker (full-fidelity transcript capture)
+        await self._init_event_log()
+
         # Auto-start transport when an initial prompt is configured
         # (dispatched sessions should begin work immediately, not wait
         # for a browser to connect). Run as a background task so the
@@ -1609,9 +1624,7 @@ class Broker:
         if self._settings.mesh.enabled:
             await self._start_mesh_adapter()
             if self._has_workflow_trigger():
-                self._workflow_trigger_task = asyncio.create_task(
-                    self._run_workflow_trigger_task()
-                )
+                self._workflow_trigger_task = asyncio.create_task(self._run_workflow_trigger_task())
         elif self._has_workflow_trigger():
             logger.warning("Workflow trigger configured but mesh is disabled — skipping dispatch")
 
@@ -1633,6 +1646,9 @@ class Broker:
         # Stop chronicle watcher first (flush pending events)
         if self._chronicle_watcher:
             await self._chronicle_watcher.stop()
+
+        # Drain and stop the durable event-log worker so the last turn persists
+        await self._stop_event_log()
 
         if self._peer_watchdog_task is not None:
             self._peer_watchdog_task.cancel()
@@ -2086,10 +2102,7 @@ class Broker:
             or f"{state.label} is waiting for human approval before the workflow can continue.",
             "reason": "needs_human_approval",
             "recommendation": state.condition
-            or (
-                "Review the pending gate and decide whether to approve "
-                "or request changes."
-            ),
+            or ("Review the pending gate and decide whether to approve or request changes."),
             "context": {
                 "gate_id": state.id,
                 "gate_label": state.label,
@@ -2800,11 +2813,16 @@ class Broker:
     async def _handle_cli_event(self, data: dict) -> None:
         """Forward a CLI event to all connected channels."""
         event_type = data.get("type", "unknown")
+
+        # Durably capture EVERY frame first — before any channel/broadcast logic —
+        # so agent output is never lost when no client is attached.
+        self._enqueue_event_log(data)
+
         if event_type == "control_request":
             self._track_pending_permission_request(data)
 
-        tool_result_only_user_event = (
-            event_type == "user" and self._is_tool_result_only_user_event(data)
+        tool_result_only_user_event = event_type == "user" and self._is_tool_result_only_user_event(
+            data
         )
         suppress_channel_broadcast = (
             event_type in {"user", "assistant", "content_block_delta", "result"}
@@ -2904,6 +2922,24 @@ class Broker:
                 )
         elif tool_result_only_user_event:
             await self._finish_assistant_tool_trace_spans_from_user_event(data)
+            # Persist tool_result blocks onto the open assistant turn so the saved
+            # conversation carries tool OUTPUT (not just the call) for read-back.
+            tr_msg = data.get("message", {})
+            tr_blocks = tr_msg.get("content", []) if isinstance(tr_msg, dict) else []
+            for tr_block in tr_blocks or []:
+                if (
+                    isinstance(tr_block, dict)
+                    and tr_block.get("type") == "tool_result"
+                    and tr_block.get("tool_use_id")
+                ):
+                    self._pending_assistant_parts.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tr_block.get("tool_use_id"),
+                            "content": tr_block.get("content"),
+                            "is_error": bool(tr_block.get("is_error")),
+                        }
+                    )
         elif event_type == "result":
             asyncio.create_task(self._report_activity_state("idle"))
             if self._pending_explicit_human_response_count == 0:
@@ -2915,30 +2951,44 @@ class Broker:
         # We also handle the HTTP streaming format (content_block_delta, result)
         # for backward compatibility.
         if event_type == "assistant":
-            # Extract content from the assistant message
+            # Extract content and ACCUMULATE parts across the messages of one turn
+            # (a tool_use message, then the final text), so the SAVED conversation
+            # turn carries tool calls + reasoning — not just text — and reloads with
+            # its tool cards. Parts are reset on flush, not per message.
             message = data.get("message", {})
             content_blocks = message.get("content", [])
             if isinstance(content_blocks, list) and content_blocks:
                 text_parts = []
-                reasoning_parts = []
                 for block in content_blocks:
                     if not isinstance(block, dict):
                         continue
-                    if block.get("type") == "text" and block.get("text"):
+                    btype = block.get("type")
+                    if btype == "text" and block.get("text"):
                         text_parts.append(block["text"])
-                    elif block.get("type") == "thinking" and block.get("thinking"):
-                        reasoning_parts.append(block["thinking"])
+                        self._pending_assistant_parts.append(
+                            {"type": "text", "text": block["text"]}
+                        )
+                    elif btype == "thinking" and block.get("thinking"):
+                        # Keep last 500 chars per reasoning block as a summary.
+                        self._pending_assistant_parts.append(
+                            {"type": "reasoning", "text": str(block["thinking"])[-500:]}
+                        )
+                    elif btype == "tool_use" and block.get("id"):
+                        self._pending_assistant_parts.append(
+                            {
+                                "type": "tool_use",
+                                "id": block.get("id"),
+                                "name": block.get("name"),
+                                "input": block.get("input") or {},
+                            }
+                        )
                 text_content = "\n".join(text_parts)
                 if text_content:
-                    self._pending_assistant_content = text_content
-                    self._pending_assistant_parts = []
-                    if reasoning_parts:
-                        # Keep last 500 chars of reasoning as summary
-                        combined = "\n".join(reasoning_parts)
-                        self._pending_assistant_parts.append(
-                            {"type": "reasoning", "text": combined[-500:]}
-                        )
-                    self._pending_assistant_parts.append({"type": "text", "text": text_content})
+                    self._pending_assistant_content = (
+                        f"{self._pending_assistant_content}\n{text_content}"
+                        if self._pending_assistant_content
+                        else text_content
+                    )
 
         # HTTP streaming format: accumulate deltas
         if event_type == "content_block_delta":
@@ -3185,6 +3235,15 @@ class Broker:
                     str(request_id),
                     response,
                     auto_approved=False,
+                )
+
+            # AskUserQuestion: a human answered a question the agent asked.
+            # Resolves the blocking can_use_tool future in SDKTransport.
+            case "ask_user_answer":
+                await self._transport.send_control(
+                    "ask_user_answer",
+                    request_id=data.get("request_id", ""),
+                    answers=data.get("answers", []),
                 )
 
             # Phase 3: interrupt current turn
@@ -3740,6 +3799,130 @@ class Broker:
             },
         )
 
+    # -- Durable event log (full-fidelity transcript capture) -----------------
+
+    FORGE_LOG_PATH_TEMPLATE = "/api/v1/forge/sessions/{sid}/log"
+
+    @staticmethod
+    def _extract_request_id(data: dict) -> str | None:
+        """Best-effort turn correlation id from a raw CLI frame."""
+        rid = data.get("request_id")
+        if isinstance(rid, str) and rid:
+            return rid
+        msg = data.get("message")
+        if isinstance(msg, dict):
+            inner = msg.get("request_id")
+            if isinstance(inner, str) and inner:
+                return inner
+        return None
+
+    def _enqueue_event_log(self, data: dict) -> None:
+        """Buffer a raw CLI frame for durable persistence. Never raises.
+
+        Runs for every frame regardless of attached channels — this is what
+        guarantees no agent output is dropped when no client is connected.
+        """
+        if not self._settings.event_log_enabled or not self.volundr_api_url:
+            return
+        self._event_log_seq += 1
+        entry = {
+            "seq": self._event_log_seq,
+            "kind": str(data.get("type", "unknown"))[:64],
+            "payload": data,
+            "request_id": self._extract_request_id(data),
+        }
+        role = data.get("role")
+        if isinstance(role, str):
+            entry["role"] = role[:32]
+        self._event_log_buffer.append(entry)
+        # Safety valve: cap memory if the backend is unreachable for a long time.
+        # Dropping the oldest is the least-bad option vs OOM-killing the broker,
+        # and is logged loudly so the loss is visible.
+        overflow = len(self._event_log_buffer) - self._settings.event_log_max_buffer
+        if overflow > 0:
+            del self._event_log_buffer[:overflow]
+            logger.warning(
+                "event log buffer overflow — dropped %d oldest frames (backend unreachable?)",
+                overflow,
+            )
+
+    async def _event_log_flush_loop(self) -> None:
+        """Background worker: drain the event-log buffer to Volundr with retry."""
+        interval = self._settings.event_log_flush_interval_ms / 1000.0
+        while not self._event_log_stopping:
+            await asyncio.sleep(interval)
+            try:
+                await self._flush_event_log()
+            except Exception:
+                logger.debug("event log flush iteration failed", exc_info=True)
+
+    async def _flush_event_log(self) -> None:
+        """Send one batch from the front of the buffer. Removes only on success."""
+        if not self.volundr_api_url:
+            return
+        async with self._event_log_lock:
+            batch = self._event_log_buffer[: self._settings.event_log_batch_size]
+        if not batch:
+            return
+
+        client = await self._get_http_client()
+        path = self.FORGE_LOG_PATH_TEMPLATE.format(sid=self.session_id)
+        try:
+            response = await client.post(path, json={"entries": batch})
+        except Exception:
+            logger.debug("event log POST failed — will retry", exc_info=True)
+            return
+        if response.status_code >= 300:
+            logger.debug(
+                "event log POST rejected (%d): %s — will retry",
+                response.status_code,
+                response.text[:200],
+            )
+            return
+        # Idempotent on (session_id, seq), so removing exactly the sent count is
+        # safe even if newer frames were appended during the POST.
+        async with self._event_log_lock:
+            del self._event_log_buffer[: len(batch)]
+
+    async def _init_event_log(self) -> None:
+        """Resume the seq counter from the backend so restarts don't collide.
+
+        The PK is (session_id, seq); if a restarted broker reset seq to 0 its
+        appends would hit ON CONFLICT DO NOTHING and silently vanish. Seeding
+        from the stored head keeps the sequence monotonic across restarts.
+        """
+        if not self._settings.event_log_enabled or not self.volundr_api_url:
+            return
+        client = await self._get_http_client()
+        path = self.FORGE_LOG_PATH_TEMPLATE.format(sid=self.session_id) + "/head"
+        try:
+            response = await client.get(path)
+            if response.status_code < 300:
+                self._event_log_seq = int(response.json().get("latest_seq", 0))
+        except Exception:
+            logger.debug("event log head fetch failed — starting seq at 0", exc_info=True)
+        self._event_log_task = asyncio.create_task(self._event_log_flush_loop())
+        logger.info("Durable event log started (resume seq=%d)", self._event_log_seq)
+
+    async def _stop_event_log(self) -> None:
+        """Drain remaining frames and stop the worker on shutdown."""
+        self._event_log_stopping = True
+        if self._event_log_task is not None:
+            self._event_log_task.cancel()
+            await asyncio.gather(self._event_log_task, return_exceptions=True)
+            self._event_log_task = None
+        # Final best-effort drain so the last turn isn't lost on shutdown.
+        for _ in range(self._settings.event_log_max_buffer):
+            async with self._event_log_lock:
+                remaining = len(self._event_log_buffer)
+            if remaining == 0:
+                return
+            before = remaining
+            await self._flush_event_log()
+            async with self._event_log_lock:
+                if len(self._event_log_buffer) >= before:
+                    return  # made no progress (backend down) — give up
+
     async def _emit_pipeline_event(
         self,
         event_type: str,
@@ -3983,9 +4166,7 @@ class Broker:
     ) -> tuple[uuid.UUID | None, str]:
         """Pop a pending assistant tool span by id, falling back to FIFO order."""
         tool_key = (
-            tool_use_id
-            if tool_use_id and tool_use_id in self._trace_assistant_tool_spans
-            else ""
+            tool_use_id if tool_use_id and tool_use_id in self._trace_assistant_tool_spans else ""
         )
         if not tool_key and self._trace_assistant_tool_order:
             tool_key = self._trace_assistant_tool_order[0]
@@ -4086,6 +4267,13 @@ class Broker:
             "turn_count": self._artifacts.turn_count,
             "duration_seconds": self._artifacts.duration_seconds,
         }
+        # Ride the CLI/agent conversation id upward so Volundr can persist it and
+        # --resume the conversation when the session is restarted. Works for both
+        # Claude (session UUID) and Codex (thread id) — every resume-capable
+        # transport implements .session_id.
+        cli_session_id = self._transport.session_id if self._transport else None
+        if cli_session_id:
+            metadata["cli_session_id"] = cli_session_id
         if extra_metadata:
             metadata.update(extra_metadata)
 

@@ -383,7 +383,7 @@ describe('ForgePage', () => {
     };
 
     wrap(createMockVolundrService(), createMockClusterAdapter(), overriddenStore);
-    await waitFor(() => expect(screen.getAllByText('req-sess').length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByTestId('inflight-row')).toBeInTheDocument());
     expect(screen.getByText('cl-unknown')).toBeInTheDocument();
     expect(screen.getAllByText('requested').length).toBeGreaterThan(0);
   });
@@ -421,9 +421,50 @@ describe('ForgePage', () => {
     };
 
     wrap(createMockVolundrService(), createMockClusterAdapter(), overriddenStore);
-    await waitFor(() => expect(screen.getAllByText('evt-sess').length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getByTestId('inflight-row')).toBeInTheDocument());
     expect(screen.getByText('cl-unknown')).toBeInTheDocument();
     expect(screen.getAllByText('Waiting for capacity').length).toBeGreaterThan(0);
+  });
+
+  it('shows the session name (not the pod id) on inflight rows', async () => {
+    const session: Session = {
+      id: 'd1f1e2c3-aaaa-bbbb-cccc-1234567890ab',
+      name: 'ux-codex-review',
+      ravnId: 'r-named',
+      personaName: 'planner',
+      templateId: 'tpl-default',
+      clusterId: 'cl-unknown',
+      state: 'running',
+      startedAt: new Date(Date.now() - 120_000).toISOString(),
+      resources: {
+        cpuRequest: 1,
+        cpuLimit: 2,
+        cpuUsed: 0.1,
+        memRequestMi: 512,
+        memLimitMi: 1024,
+        memUsedMi: 128,
+        gpuCount: 0,
+      },
+      env: {},
+      events: [],
+    };
+
+    const store = createMockSessionStore();
+    const overriddenStore: ISessionStore = {
+      ...store,
+      listSessions: async () => [session],
+      subscribe: (cb) => {
+        cb([session]);
+        return () => {};
+      },
+    };
+
+    wrap(createMockVolundrService(), createMockClusterAdapter(), overriddenStore);
+    await waitFor(() => expect(screen.getByTestId('inflight-row')).toBeInTheDocument());
+    // name shows in both the in-flight row and the recent-fleet tail
+    expect(screen.getAllByText('ux-codex-review').length).toBeGreaterThan(0);
+    // the raw pod GUID must not be used as the visible name (only as a title tooltip)
+    expect(screen.queryByText(session.id)).not.toBeInTheDocument();
   });
 
   it('renders all sessions link in inflight header', async () => {

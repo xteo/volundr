@@ -8,6 +8,8 @@ import { useVolundrClusters } from './hooks/useVolundrClusters';
 import { useSessionList } from './hooks/useSessionStore';
 import { useTemplates } from './useTemplates';
 import { LaunchWizard } from './LaunchWizard';
+import { QuickLaunch } from './QuickLaunch';
+import { useMiniMode } from './useFeatures';
 import { money, tokens } from './utils/formatters';
 import type { Cluster, ClusterKind } from '../domain/cluster';
 import type { Session, SessionState } from '../domain/session';
@@ -413,6 +415,8 @@ export function ForgePage() {
 
   const [launchOpen, setLaunchOpen] = useState(false);
   const [launchTemplateId, setLaunchTemplateId] = useState<string | null>(null);
+  // Mini (local, no-k8s) deployments get the simple Quick Launch.
+  const miniMode = useMiniMode();
 
   const allSessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
   const dashboardSessions = useMemo(() => {
@@ -699,12 +703,16 @@ export function ForgePage() {
         </div>
       </div>
 
-      <LaunchWizard
-        key={launchTemplateId ?? 'forge-custom'}
-        open={launchOpen}
-        onOpenChange={setLaunchOpen}
-        initialTemplateId={launchTemplateId ?? undefined}
-      />
+      {miniMode ? (
+        <QuickLaunch open={launchOpen} onOpenChange={setLaunchOpen} />
+      ) : (
+        <LaunchWizard
+          key={launchTemplateId ?? 'forge-custom'}
+          open={launchOpen}
+          onOpenChange={setLaunchOpen}
+          initialTemplateId={launchTemplateId ?? undefined}
+        />
+      )}
     </>
   );
 }

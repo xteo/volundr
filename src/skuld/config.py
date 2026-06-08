@@ -190,12 +190,16 @@ class SkuldSessionConfig(BaseModel):
 
     id: str = Field(default="unknown")
     name: str = Field(default="unknown")
-    model: str = Field(default="claude-sonnet-4-6")
+    model: str = Field(default="claude-opus-4-8")
     workspace_dir: str | None = Field(default=None)
     system_prompt: str = Field(default="")
     initial_prompt: str = Field(default="")
     saga_id: str | None = Field(default=None)
     run_id: str | None = Field(default=None)
+    # Prior CLI/agent conversation id to --resume when this session is restarted
+    # (set by Volundr from the persisted session.cli_session_id via
+    # SKULD__SESSION__RESUME_SESSION_ID). Empty on a fresh session.
+    resume_session_id: str | None = Field(default=None)
 
 
 class ArchiveStoreConfig(BaseModel):
@@ -251,6 +255,13 @@ class SkuldSettings(BaseSettings):
     archive_store: ArchiveStoreConfig = Field(default_factory=ArchiveStoreConfig)
     chronicle_watcher_enabled: bool = Field(default=True)
     chronicle_watcher_debounce_ms: int = Field(default=500)
+    # Durable full-fidelity event log: every CLI frame is appended to the
+    # Volundr session_event_log so any client can replay the full transcript
+    # (including the in-flight turn) regardless of whether a socket is attached.
+    event_log_enabled: bool = Field(default=True)
+    event_log_batch_size: int = Field(default=100)
+    event_log_flush_interval_ms: int = Field(default=500)
+    event_log_max_buffer: int = Field(default=50_000)
     max_upload_size_bytes: int = Field(default=104_857_600)  # 100 MB
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -282,7 +293,7 @@ class SkuldSettings(BaseSettings):
             if val:
                 self.session.name = val
 
-        if self.session.model == "claude-sonnet-4-6":
+        if self.session.model == "claude-opus-4-8":
             val = os.environ.get("MODEL")
             if val:
                 self.session.model = val

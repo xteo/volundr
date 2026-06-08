@@ -50,6 +50,7 @@ export type ConnectionType = 'cli' | 'ide' | 'api';
 export interface Session {
   id: string;
   ravnId: string;
+  /** Human-readable session name (e.g. "ux-codex-review"). Falls back to personaName. */
   name?: string;
   title?: string;
   personaName: string;

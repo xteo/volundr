@@ -138,11 +138,19 @@ class CodexWebSocketTransport(CLITransport):
         initial_prompt: str = "",
         codex_port: int = 0,
         mcp_servers: list[dict] | None = None,
+        reasoning_effort: str = "",
+        fast_mode: bool = False,
+        resume_session_id: str | None = None,
         **_kwargs: object,
     ) -> None:
         super().__init__()
         self.workspace_dir = workspace_dir
         self._model = model
+        # Default Codex to HIGH reasoning effort when none is specified — push new
+        # sessions to think hard by default (Codex has no `max` tier).
+        self._reasoning_effort = reasoning_effort or "high"
+        self._fast_mode = fast_mode
+        self._resume_session_id = (resume_session_id or "").strip() or None
         self._skip_permissions = skip_permissions
         self._approval_policy = approval_policy.strip()
         self._sandbox = sandbox.strip()
@@ -218,7 +226,9 @@ class CodexWebSocketTransport(CLITransport):
             await self._start_fallback_transport(exc)
             return
 
-        if self._initial_prompt:
+        # On resume the prior thread's history is reloaded, so don't replay the
+        # initial prompt (it was already part of that conversation).
+        if self._initial_prompt and not self._resume_session_id:
             await self.send_message(self._initial_prompt)
 
     async def stop(self) -> None:
@@ -408,6 +418,12 @@ class CodexWebSocketTransport(CLITransport):
 
         await self._send_notification("initialized")
 
+        # Restart continuity: if we carry a prior thread id, resume it (reloads
+        # the conversation) instead of starting a fresh thread.
+        if self._resume_session_id:
+            await self.resume(self._resume_session_id)
+            return
+
         thread_params: dict = {
             "experimentalRawEvents": False,
             "persistExtendedHistory": True,
@@ -415,6 +431,24 @@ class CodexWebSocketTransport(CLITransport):
         }
         if self._model:
             thread_params["model"] = self._model
+        # Reasoning effort -> codex thread param. Codex accepts
+        # minimal/low/medium/high; map extra-high/xhigh/max to the highest
+        # supported value so an unknown alias can never break the session.
+        if self._reasoning_effort:
+            _eff = self._reasoning_effort.strip().lower()
+            _map = {
+                "minimal": "minimal",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "extra-high": "high",
+                "extra_high": "high",
+                "xhigh": "high",
+                "max": "high",
+            }
+            thread_params["modelReasoningEffort"] = _map.get(_eff, "high")
+        # fast_mode is a Claude Code concept; codex has no equivalent thread
+        # param, so it is intentionally accepted-but-not-emitted here.
         thread_params.update(self._permission_thread_params())
         if self._system_prompt:
             # baseInstructions = role/persona ("you are a service developer…")
@@ -670,8 +704,7 @@ class CodexWebSocketTransport(CLITransport):
                 payload.get("call_id"),
             )
             task_name = (
-                "codex-response-function-"
-                f"{payload.get('call_id') or payload.get('name') or 'call'}"
+                f"codex-response-function-{payload.get('call_id') or payload.get('name') or 'call'}"
             )
             task = asyncio.create_task(
                 self._handle_raw_function_call_item(payload),
@@ -892,8 +925,7 @@ class CodexWebSocketTransport(CLITransport):
         env = args.get("env")
         if isinstance(env, dict):
             exec_params["env"] = {
-                str(key): (str(value) if value is not None else None)
-                for key, value in env.items()
+                str(key): (str(value) if value is not None else None) for key, value in env.items()
             }
 
         result = await self._send_rpc("command/exec", exec_params)

@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # Default configuration values
 DEFAULT_WORKSPACES_DIR = "~/.niuu/workspaces"
 DEFAULT_CLAUDE_BINARY = "claude"
-DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_MAX_CONCURRENT = 8
 DEFAULT_SDK_PORT_START = 9100
 DEFAULT_STOP_TIMEOUT = 10
 DEFAULT_STATE_FILE = "~/.niuu/forge-state.json"
@@ -436,9 +436,7 @@ class LocalProcessPodManager(PodManager):
         self._state_file = Path(str(state_file)).expanduser()
         if isinstance(allowed_mount_prefixes, str):
             allowed_mount_prefixes = [
-                prefix.strip()
-                for prefix in allowed_mount_prefixes.split(",")
-                if prefix.strip()
+                prefix.strip() for prefix in allowed_mount_prefixes.split(",") if prefix.strip()
             ]
         self._allowed_mount_prefixes = allowed_mount_prefixes or DEFAULT_ALLOWED_MOUNT_PREFIXES
 
@@ -493,9 +491,7 @@ class LocalProcessPodManager(PodManager):
                 if container.get("name", "").startswith("ravn-")
             )
             if persona_count > 0:
-                flock_plan = self._flock_port_plan(
-                    self._pick_flock_base_port(persona_count)
-                )
+                flock_plan = self._flock_port_plan(self._pick_flock_base_port(persona_count))
 
         info = ProcessInfo(
             session_id=session_id,
@@ -660,9 +656,7 @@ class LocalProcessPodManager(PodManager):
             local_workspace = _local_workspace_from_repo(session.source.repo)
             if local_workspace is not None:
                 if not local_workspace.is_dir():
-                    raise RuntimeError(
-                        f"local repo path {local_workspace!r} is not a directory"
-                    )
+                    raise RuntimeError(f"local repo path {local_workspace!r} is not a directory")
                 workspace = local_workspace.resolve()
                 self._write_claude_md(workspace, spec)
                 return workspace
@@ -940,6 +934,12 @@ class LocalProcessPodManager(PodManager):
         model = str(session.model or spec.values.get("model", "") or "").strip()
         env["SKULD__SESSION__MODEL"] = model
         env["SKULD__SESSION__WORKSPACE_DIR"] = str(workspace)
+        # Restart continuity: if this session previously captured a CLI/agent
+        # conversation id, hand it to Skuld so the transport --resume's it (the
+        # in-place mini workspace + stable $HOME keep the CLI history on disk).
+        resume_sid = str(getattr(session, "cli_session_id", None) or "").strip()
+        if resume_sid:
+            env["SKULD__SESSION__RESUME_SESSION_ID"] = resume_sid
         env["SKULD__HOST"] = "127.0.0.1"
         env["SKULD__PORT"] = str(port)
         env.setdefault("SKULD__TRANSPORT", "sdk")

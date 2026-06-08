@@ -319,11 +319,22 @@ describe('buildVolundrHttpAdapter', () => {
     expect(client.get).toHaveBeenCalledWith('/stats');
   });
 
-  it('getFeatures calls GET /features', async () => {
+  it('getFeatures calls GET /feature-flags and maps snake_case flags', async () => {
+    // makeClient()'s base is already canonical (.../forge), so the adapter uses
+    // it directly as the forge client.
     const client = makeClient();
-    await buildVolundrHttpAdapter(client).getFeatures();
-    const sharedClient = getDerivedClient('http://localhost:8080/api/v1');
-    expect(sharedClient.get).toHaveBeenCalledWith('/features');
+    client.get.mockResolvedValueOnce({
+      mini_mode: true,
+      local_mounts_enabled: true,
+      file_manager_enabled: false,
+    });
+    const features = await buildVolundrHttpAdapter(client).getFeatures();
+    expect(client.get).toHaveBeenCalledWith('/feature-flags');
+    expect(features).toEqual({
+      miniMode: true,
+      localMountsEnabled: true,
+      fileManagerEnabled: false,
+    });
   });
 
   it('getCredentials forwards the optional secret type and applies the fallback type', async () => {
@@ -502,12 +513,11 @@ describe('buildVolundrHttpAdapter', () => {
     expect(queryMocks.createApiClient).toHaveBeenCalledWith('http://localhost:8080/api/v1/niuu');
 
     const forgeClient = getDerivedClient('http://localhost:8080/api/v1/forge');
-    const sharedClient = getDerivedClient('http://localhost:8080/api/v1');
     const niuuClient = getDerivedClient('http://localhost:8080/api/v1/niuu');
     const credentialsClient = getDerivedClient('http://localhost:8080/api/v1/credentials');
 
     expect(forgeClient.get).toHaveBeenCalledWith('/session-definitions');
-    expect(sharedClient.get).toHaveBeenCalledWith('/features');
+    expect(forgeClient.get).toHaveBeenCalledWith('/feature-flags');
     expect(niuuClient.get).toHaveBeenCalledWith('/instances?kind=volundr&enabledOnly=true');
     expect(credentialsClient.get).toHaveBeenCalledWith('/user');
   });
@@ -528,11 +538,10 @@ describe('buildVolundrHttpAdapter', () => {
     );
 
     const forgeClient = getDerivedClient('http://localhost:8080/api/v1/forge');
-    const sharedClient = getDerivedClient('http://localhost:8080/api/v1');
     const niuuClient = getDerivedClient('http://localhost:8080/api/v1/niuu');
 
     expect(forgeClient.get).toHaveBeenCalledWith('/sessions/sess-1');
-    expect(sharedClient.get).toHaveBeenCalledWith('/features');
+    expect(forgeClient.get).toHaveBeenCalledWith('/feature-flags');
     expect(niuuClient.get).toHaveBeenCalledWith('/instances?kind=volundr&enabledOnly=true');
   });
 

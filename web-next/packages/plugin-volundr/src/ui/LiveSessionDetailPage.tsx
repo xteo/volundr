@@ -60,6 +60,7 @@ import { PermissionApprovalPanel } from './PermissionApprovalPanel';
 import { buildPermissionAutoApprovalRequest } from './permissionAutoApproval';
 import { SessionTerminalLive } from './SessionTerminalLive';
 import { StructuredLogViewer } from './components/StructuredLogViewer';
+import { getShowDebugMeta } from './uxPrefs';
 import './LiveSessionDetailPage.css';
 
 type SessionTab = 'chat' | 'terminal' | 'diffs' | 'files' | 'chronicles' | 'telemetry' | 'logs';
@@ -82,7 +83,10 @@ const FIXED_TAB_ORDER: Partial<Record<SessionTab, number>> = {
 };
 
 function isSessionBooting(status: string | null | undefined): boolean {
-  return status === 'starting' || status === 'provisioning';
+  // 'created' is the transient initial state before the backend auto-starts the
+  // session (create_and_start_session); treat it as booting so a freshly-created
+  // session shows "starting…" instead of a "Start the session" dead-end.
+  return status === 'created' || status === 'starting' || status === 'provisioning';
 }
 
 function formatCount(value: number): string {
@@ -3473,6 +3477,9 @@ export function LiveSessionDetailPage({
     [sessionFeaturesQuery.data],
   );
   const featurePrefs = useMemo(() => featurePrefsQuery.data ?? [], [featurePrefsQuery.data]);
+  // Hide debug plumbing (raw session GUID chip, forge/instance label) from the
+  // header unless the operator opts in — same toggle as the session cards.
+  const showDebugMeta = getShowDebugMeta();
   const transcriptTurns = useMemo(() => transcriptQuery.data?.turns ?? [], [transcriptQuery.data]);
   const replayMessages = useMemo(() => transformTurns(transcriptTurns), [transcriptTurns]);
   const replayParticipants = useMemo(
@@ -3826,7 +3833,7 @@ export function LiveSessionDetailPage({
                 <SourceMeta session={liveSession} />
               </>
             ) : null}
-            {forgeBadgeLabel ? (
+            {showDebugMeta && forgeBadgeLabel ? (
               <>
                 <HeaderDivider />
                 <SessionForgeBadge label={forgeBadgeLabel} />
@@ -3846,7 +3853,9 @@ export function LiveSessionDetailPage({
             <HeaderMetric label="Msgs" value={formatCount(headerMessageCount)} />
             <HeaderDivider />
             <HeaderMetric label="Tokens" value={formatCount(liveSession?.tokensUsed ?? 0)} />
-            {trailingMetric ? (
+            {/* trailingMetric is the Forge/instance label — debug plumbing,
+                gated behind the debug-meta toggle (same as the session cards). */}
+            {showDebugMeta && trailingMetric ? (
               <>
                 <HeaderDivider />
                 <HeaderMetric label={trailingMetric.label} value={trailingMetric.value} />
@@ -3949,7 +3958,14 @@ export function LiveSessionDetailPage({
         </div>
       </div>
 
-      <div className="niuu-min-h-0 niuu-flex-1 niuu-overflow-hidden">
+      {/* Scroll frame for every tab. Inline minHeight/overflow because the
+          niuu-min-h-0 / niuu-overflow-hidden utilities don't reliably apply to
+          this element in the dev CSS bundle; without min-height:0 this flex
+          item can't shrink below its content and the whole page scrolls. */}
+      <div
+        className="niuu-min-h-0 niuu-flex-1 niuu-overflow-hidden"
+        style={{ flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}
+      >
         {activeTab === 'chat' && (
           <div role="tabpanel" className="niuu-flex niuu-h-full niuu-min-h-0 niuu-flex-col">
             {isReady && chatEndpoint ? (

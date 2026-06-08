@@ -95,6 +95,7 @@ class VolundrPlugin(ServicePlugin):
                     "/api/v1/forge/prompts",
                     "/api/v1/forge/cluster",
                     "/api/v1/forge/git",
+                    "/api/v1/forge/feature-flags",
                 ),
                 description="Forge session, workspace, template, repo, and execution routes.",
             ),

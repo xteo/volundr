@@ -140,6 +140,13 @@ function createSessionStoreWithSessions(sessions: Session[]): ISessionStore {
 describe('SessionsPage', () => {
   beforeEach(() => {
     navigate.mockClear();
+    // niuu-ux: reset persisted UX prefs (folded groups, hide-archived)
+    // so default-collapse / default-hide behavior is deterministic per test.
+    try {
+      window.localStorage.clear();
+    } catch {
+      /* localStorage unavailable — non-fatal */
+    }
   });
 
   it('renders the sessions page container', () => {
@@ -189,13 +196,20 @@ describe('SessionsPage', () => {
     await waitFor(() => expect(screen.getByTestId('pod-group-error')).toBeInTheDocument());
   });
 
-  it('renders ARCHIVED group when archived sessions are present', async () => {
+  it('renders ARCHIVED group when archived sessions are revealed', async () => {
     const store = createSessionStoreWithSessions([
       makeSession({ id: 'arch-1', personaName: 'archiver', state: 'archived' }),
     ]);
     wrap(store);
+    // Archived is hidden by default — reveal it via the header toggle.
+    await waitFor(() => expect(screen.getByTestId('pod-toggle-archived')).toBeInTheDocument());
+    expect(screen.queryByTestId('pod-group-archived')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('pod-toggle-archived'));
     await waitFor(() => expect(screen.getByTestId('pod-group-archived')).toBeInTheDocument());
-    expect(screen.getByTestId('pod-entry-arch-1')).toBeInTheDocument();
+    // The ARCHIVED group is folded by default — expand it to see its rows.
+    expect(screen.queryByTestId('pod-entry-arch-1')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('pod-group-archived-header'));
+    await waitFor(() => expect(screen.getByTestId('pod-entry-arch-1')).toBeInTheDocument());
   });
 
   it('renders pod entries for running sessions', async () => {
@@ -346,6 +360,8 @@ describe('SessionsPage', () => {
   });
 
   it('renders the forge label when a session has an instance name', async () => {
+    // The forge/cluster id is debug metadata, hidden unless explicitly enabled.
+    window.localStorage.setItem('niuu.compactUx.showDebugMeta', '1');
     const store = createSessionStoreWithSessions([
       makeSession({
         id: 'forge-1',
@@ -356,11 +372,31 @@ describe('SessionsPage', () => {
       }),
     ]);
 
+    try {
+      wrap(store);
+      await waitFor(() => expect(screen.getByTestId('pod-entry-forge-1')).toBeInTheDocument());
+      const row = screen.getByTestId('pod-entry-forge-1');
+      expect(row).toHaveTextContent(/forge/i);
+      expect(row).toHaveTextContent('Guild Alpha');
+    } finally {
+      window.localStorage.removeItem('niuu.compactUx.showDebugMeta');
+    }
+  });
+
+  it('hides the forge label by default (debug metadata off)', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({
+        id: 'forge-2',
+        personaName: 'forge test',
+        state: 'running',
+        clusterId: 'guild-alpha',
+        clusterName: 'Guild Alpha',
+      }),
+    ]);
+
     wrap(store);
-    await waitFor(() => expect(screen.getByTestId('pod-entry-forge-1')).toBeInTheDocument());
-    const row = screen.getByTestId('pod-entry-forge-1');
-    expect(row).toHaveTextContent(/forge/i);
-    expect(row).toHaveTextContent('Guild Alpha');
+    await waitFor(() => expect(screen.getByTestId('pod-entry-forge-2')).toBeInTheDocument());
+    expect(screen.getByTestId('pod-entry-forge-2')).not.toHaveTextContent('Guild Alpha');
   });
 
   it('shows archive-all-stopped action and calls the service', async () => {
@@ -405,6 +441,51 @@ describe('SessionsPage', () => {
     await waitFor(() => expect(deleteSession).toHaveBeenCalledTimes(2));
     expect(deleteSession).toHaveBeenCalledWith('stopped-1');
     expect(deleteSession).toHaveBeenCalledWith('stopped-2');
+  });
+
+  it('selects all visible stopped sessions and clears the selection', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({ id: 'stopped-1', personaName: 'stopped one', state: 'terminated' }),
+      makeSession({ id: 'stopped-2', personaName: 'stopped two', state: 'terminated' }),
+      makeSession({ id: 'running-1', personaName: 'running one', state: 'running' }),
+    ]);
+    const volundr = createMockVolundrService();
+
+    wrap(store, volundr);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('toggle-stopped-selection-button')).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTestId('toggle-stopped-selection-button'));
+
+    fireEvent.click(screen.getByTestId('select-all-stopped-button'));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('clear-stopped-selection-button'));
+    expect(screen.getByText('0 selected')).toBeInTheDocument();
+  });
+
+  it('stops and archives a session from the row hover actions', async () => {
+    const store = createSessionStoreWithSessions([
+      makeSession({ id: 'run-stop', personaName: 'stop me', state: 'running' }),
+      makeSession({ id: 'run-arch', personaName: 'archive me', state: 'running' }),
+    ]);
+    const volundr = createMockVolundrService();
+    const stopSession = vi.fn().mockResolvedValue(undefined);
+    const archiveSession = vi.fn().mockResolvedValue(undefined);
+    (volundr as IVolundrService).stopSession = stopSession;
+    (volundr as IVolundrService).archiveSession = archiveSession;
+
+    wrap(store, volundr);
+
+    await waitFor(() => expect(screen.getByTestId('pod-entry-run-stop-stop')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('pod-entry-run-stop-stop'));
+    await waitFor(() => expect(stopSession).toHaveBeenCalledWith('run-stop'));
+
+    fireEvent.click(screen.getByTestId('pod-entry-run-arch-archive'));
+    await waitFor(() => expect(archiveSession).toHaveBeenCalledWith('run-arch'));
+    // Archive of an active session stops it first.
+    expect(stopSession).toHaveBeenCalledWith('run-arch');
   });
 
   it('navigates back to the sessions list when deleting the selected stopped session', async () => {

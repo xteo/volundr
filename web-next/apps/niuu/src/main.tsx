@@ -4,14 +4,7 @@ import '@niuulabs/design-tokens/tokens.css';
 import '@niuulabs/ui/styles.css';
 import '@niuulabs/shell/index.css';
 import '@niuulabs/plugin-login/styles.css';
-import '@niuulabs/plugin-mimir/styles.css';
-import '@niuulabs/plugin-mimir/index.css';
-import '@niuulabs/plugin-observatory/styles.css';
-import '@niuulabs/plugin-observatory/index.css';
-import '@niuulabs/plugin-ravn/styles.css';
-import '@niuulabs/plugin-ravn/index.css';
-import '@niuulabs/plugin-ting/styles.css';
-import '@niuulabs/plugin-ting/index.css';
+// niuu-ux: only enabled-module CSS is loaded (see pluginConfig.ts).
 import '@niuulabs/plugin-volundr/styles.css';
 import '@niuulabs/plugin-volundr/index.css';
 import './styles.css';

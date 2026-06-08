@@ -100,13 +100,13 @@ const DEFINITION_RUNES: Record<string, string> = {
   aider: '\u16A8',
 };
 
-const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
+export const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
   {
     key: 'skuldClaude',
     displayName: 'Claude Code',
     description: '',
     labels: [],
-    defaultModel: '',
+    defaultModel: 'claude-opus-4-8',
     compatibleProviders: ['anthropic'],
   },
   {
@@ -114,7 +114,7 @@ const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
     displayName: 'Codex',
     description: '',
     labels: [],
-    defaultModel: '',
+    defaultModel: 'gpt-5.5',
     compatibleProviders: ['openai'],
   },
   {
@@ -258,7 +258,8 @@ export function normalizeRepoUrl(url: string): string {
 }
 
 export function pickDefaultModel(models: Record<string, RuntimeModelDescriptor>): string {
-  if ('sonnet-primary' in models) return 'sonnet-primary';
+  // Prefer the frontier default; never fall back to a lesser model.
+  if ('claude-opus-4-8' in models) return 'claude-opus-4-8';
   return Object.keys(models)[0] ?? '';
 }
 
@@ -1133,7 +1134,7 @@ export function RuntimeStep({
                 <Input
                   value={form.model}
                   onChange={(e) => update({ model: e.target.value })}
-                  placeholder="sonnet-primary"
+                  placeholder="claude-opus-4-8"
                 />
               )}
             </Field>
@@ -1969,7 +1970,7 @@ export function LaunchWizard({ open, onOpenChange, initialTemplateId }: LaunchWi
     envVars: [],
     setupScripts: [],
     definition: 'skuldClaude',
-    model: 'sonnet-primary',
+    model: 'claude-opus-4-8',
     cpu: '2',
     mem: '8Gi',
     gpu: '0',

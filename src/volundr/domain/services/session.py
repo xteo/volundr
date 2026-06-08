@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -350,8 +350,18 @@ class SessionService:
         if session is None:
             raise SessionNotFoundError(session_id)
 
+        # The broker rides the CLI/agent conversation id on activity reports.
+        # Persist it as a first-class field (so the session can be --resume'd after
+        # a stop) and keep it OUT of activity_metadata, which is clobbered below.
+        cli_session_id = metadata.pop("cli_session_id", None)
+        if cli_session_id and cli_session_id != session.cli_session_id:
+            session.cli_session_id = cli_session_id
+
         session.activity_state = state
         session.activity_metadata = metadata
+        # Treat each activity report as a liveness heartbeat so the reconciler can
+        # tell a live-but-idle session from one whose broker has died.
+        session.last_active = datetime.now(UTC)
         updated = await self._repository.update(session)
 
         if self._broadcaster is not None:
@@ -370,6 +380,40 @@ class SessionService:
         if self._should_auto_stop_after_activity(updated, state, metadata):
             self._schedule_activity_stop(updated.id)
         return updated
+
+    async def reconcile_liveness(self, stale_after_seconds: int) -> int:
+        """Mark running sessions with no recent activity heartbeat as stopped.
+
+        A session whose broker has died otherwise sits in ``running`` forever
+        with a stale ``chat_endpoint``; clients then open a socket to a tombstone
+        and see nothing. Reconciling clears the endpoint and flips the status to
+        ``stopped`` (resumable) so the list reflects reality.
+
+        Returns the number of sessions reconciled.
+        """
+        threshold = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        stale = await self._repository.list_stale_running(threshold)
+        reconciled = 0
+        for session in stale:
+            stopped = session.model_copy(
+                update={
+                    "status": SessionStatus.STOPPED,
+                    "chat_endpoint": None,
+                    "code_endpoint": None,
+                    "error": "liveness: no activity heartbeat — broker presumed dead",
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            result = await self._repository.update(stopped)
+            reconciled += 1
+            logger.warning(
+                "Liveness: marked stale running session %s as stopped (last_active=%s)",
+                session.id,
+                session.last_active,
+            )
+            if self._broadcaster is not None:
+                await self._broadcaster.publish_session_updated(result)
+        return reconciled
 
     def _should_auto_stop_after_activity(
         self,
@@ -1175,7 +1219,6 @@ def _communication_route_id(
 ) -> UUID:
     """Return a stable route UUID for a session communication target."""
     value = (
-        f"volundr:communication-route:{session_id}:{platform}:"
-        f"{conversation_id}:{thread_id or ''}"
+        f"volundr:communication-route:{session_id}:{platform}:{conversation_id}:{thread_id or ''}"
     )
     return uuid5(NAMESPACE_URL, value)

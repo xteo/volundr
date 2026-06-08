@@ -19,6 +19,7 @@ import { MarkdownContent } from '../MarkdownContent';
 import { ToolBlock, ToolGroupBlock, groupContentBlocks } from '../ToolBlock';
 import type { ChatMessage, ChatMessagePart } from '../../types';
 import type { ContentBlock as ToolContentBlock } from '../ToolBlock';
+import { getCompactUxChatPrefs } from '../../compactUxPrefs';
 import './ChatMessages.css';
 
 const formatTime = (date: Date): string =>
@@ -76,13 +77,31 @@ export function UserMessage({ message }: UserMessageProps) {
         </div>
         {message.attachments && message.attachments.length > 0 && (
           <div className="niuu-chat-attachment-row">
-            {message.attachments.map((att, i) => (
-              <span key={`${att.name}-${i}`} className="niuu-chat-attachment-badge">
-                <Paperclip className="niuu-chat-attachment-icon" />
-                <span>{att.name}</span>
-                <span className="niuu-chat-attachment-size">{formatFileSize(att.size)}</span>
-              </span>
-            ))}
+            {message.attachments.map((att, i) =>
+              att.previewUrl ? (
+                <img
+                  key={`${att.name}-${i}`}
+                  src={att.previewUrl}
+                  alt={att.name}
+                  className="niuu-chat-attachment-badge"
+                  style={{
+                    maxHeight: 96,
+                    maxWidth: 160,
+                    height: 'auto',
+                    width: 'auto',
+                    borderRadius: 8,
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              ) : (
+                <span key={`${att.name}-${i}`} className="niuu-chat-attachment-badge">
+                  <Paperclip className="niuu-chat-attachment-icon" />
+                  <span>{att.name}</span>
+                  <span className="niuu-chat-attachment-size">{formatFileSize(att.size)}</span>
+                </span>
+              ),
+            )}
           </div>
         )}
       </div>
@@ -130,11 +149,15 @@ export function AssistantMessage({
     handleCopyClick();
   }, [message.content, onCopy, handleCopyClick]);
 
+  const uxPrefs = getCompactUxChatPrefs();
+
   return (
     <div className="niuu-chat-assistant-wrapper" data-testid="assistant-message">
-      <div className="niuu-chat-avatar">
-        <Hammer className="niuu-chat-avatar-icon" />
-      </div>
+      {uxPrefs.showAgentAvatar && (
+        <div className="niuu-chat-avatar">
+          <Hammer className="niuu-chat-avatar-icon" />
+        </div>
+      )}
       <div className="niuu-chat-assistant-body">
         <div className="niuu-chat-assistant-header">
           {model && <span className="niuu-chat-model-badge">{model}</span>}
@@ -184,58 +207,60 @@ export function AssistantMessage({
           )}
         </div>
 
-        <div className="niuu-chat-action-bar">
-          <button
-            type="button"
-            className="niuu-chat-action-btn"
-            onClick={handleCopy}
-            title={copied ? 'Copied' : 'Copy'}
-          >
-            {copied ? (
-              <Check className="niuu-chat-action-icon" />
-            ) : (
-              <Copy className="niuu-chat-action-icon" />
-            )}
-          </button>
-          {onRegenerate && (
+        {uxPrefs.showMessageActions && (
+          <div className="niuu-chat-action-bar">
             <button
               type="button"
               className="niuu-chat-action-btn"
-              onClick={() => onRegenerate(message.id)}
-              title="Regenerate"
+              onClick={handleCopy}
+              title={copied ? 'Copied' : 'Copy'}
             >
-              <RefreshCw className="niuu-chat-action-icon" />
+              {copied ? (
+                <Check className="niuu-chat-action-icon" />
+              ) : (
+                <Copy className="niuu-chat-action-icon" />
+              )}
             </button>
-          )}
-          <div className="niuu-chat-action-divider" />
-          <button
-            type="button"
-            className="niuu-chat-action-btn"
-            data-active={thumbState === 'up'}
-            onClick={() => setThumbState((prev) => (prev === 'up' ? null : 'up'))}
-            title="Helpful"
-          >
-            <ThumbsUp className="niuu-chat-action-icon" />
-          </button>
-          <button
-            type="button"
-            className="niuu-chat-action-btn"
-            data-active={thumbState === 'down'}
-            onClick={() => setThumbState((prev) => (prev === 'down' ? null : 'down'))}
-            title="Not helpful"
-          >
-            <ThumbsDown className="niuu-chat-action-icon" />
-          </button>
-          <div className="niuu-chat-action-divider" />
-          <button
-            type="button"
-            className={cn('niuu-chat-action-btn', bookmarked && 'niuu-chat-action-btn--active')}
-            onClick={() => onBookmark?.(message.id, !bookmarked)}
-            title={bookmarked ? 'Remove bookmark' : 'Bookmark'}
-          >
-            <Bookmark className="niuu-chat-action-icon" />
-          </button>
-        </div>
+            {onRegenerate && (
+              <button
+                type="button"
+                className="niuu-chat-action-btn"
+                onClick={() => onRegenerate(message.id)}
+                title="Regenerate"
+              >
+                <RefreshCw className="niuu-chat-action-icon" />
+              </button>
+            )}
+            <div className="niuu-chat-action-divider" />
+            <button
+              type="button"
+              className="niuu-chat-action-btn"
+              data-active={thumbState === 'up'}
+              onClick={() => setThumbState((prev) => (prev === 'up' ? null : 'up'))}
+              title="Helpful"
+            >
+              <ThumbsUp className="niuu-chat-action-icon" />
+            </button>
+            <button
+              type="button"
+              className="niuu-chat-action-btn"
+              data-active={thumbState === 'down'}
+              onClick={() => setThumbState((prev) => (prev === 'down' ? null : 'down'))}
+              title="Not helpful"
+            >
+              <ThumbsDown className="niuu-chat-action-icon" />
+            </button>
+            <div className="niuu-chat-action-divider" />
+            <button
+              type="button"
+              className={cn('niuu-chat-action-btn', bookmarked && 'niuu-chat-action-btn--active')}
+              onClick={() => onBookmark?.(message.id, !bookmarked)}
+              title={bookmarked ? 'Remove bookmark' : 'Bookmark'}
+            >
+              <Bookmark className="niuu-chat-action-icon" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
