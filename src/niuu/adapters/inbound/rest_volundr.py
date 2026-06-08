@@ -771,4 +771,96 @@ def create_volundr_router(
         _ensure_remote_success(response)
         return response.json()
 
+    # --- Skuld broker ingestion routes (heartbeat + durable event log) --------
+    # The in-instance Skuld broker reports activity + appends its full-fidelity
+    # event log back to the Forge API. Those routes live on the instance
+    # (volundr) app but the guild aggregate owns /api/v1/forge, so they MUST be
+    # proxied through here too — otherwise the broker's posts 404, last_active
+    # never advances (liveness reaps the session) and no transcript is captured.
+
+    @router.post("/sessions/{session_id}/activity", status_code=status.HTTP_204_NO_CONTENT)
+    async def report_activity(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        body: dict[str, Any] = Body(default_factory=dict),
+        principal: Principal = Depends(extract_principal),
+    ) -> Response:
+        instance, _ = await _find_session_owner(
+            service, principal, request, session_id, embedded_app=embedded_forge_app
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="POST",
+            path=f"/sessions/{session_id}/activity",
+            json_body=body,
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.post("/sessions/{session_id}/log", status_code=status.HTTP_201_CREATED)
+    async def append_log(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        body: dict[str, Any] = Body(default_factory=dict),
+        principal: Principal = Depends(extract_principal),
+    ) -> dict[str, Any]:
+        instance, _ = await _find_session_owner(
+            service, principal, request, session_id, embedded_app=embedded_forge_app
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="POST",
+            path=f"/sessions/{session_id}/log",
+            json_body=body,
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    @router.get("/sessions/{session_id}/log/head")
+    async def get_log_head(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        principal: Principal = Depends(extract_principal),
+    ) -> dict[str, Any]:
+        instance, _ = await _find_session_owner(
+            service, principal, request, session_id, embedded_app=embedded_forge_app
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="GET",
+            path=f"/sessions/{session_id}/log/head",
+            params=_query_params(request),
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    @router.get("/sessions/{session_id}/log")
+    async def get_log(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        principal: Principal = Depends(extract_principal),
+    ) -> dict[str, Any]:
+        instance, _ = await _find_session_owner(
+            service, principal, request, session_id, embedded_app=embedded_forge_app
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="GET",
+            path=f"/sessions/{session_id}/log",
+            params=_query_params(request),
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"entries": []}
+
     return router
