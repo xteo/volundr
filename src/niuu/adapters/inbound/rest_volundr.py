@@ -571,6 +571,33 @@ def create_volundr_router(
         payload = response.json()
         return _with_instance(payload, instance) if isinstance(payload, dict) else {}
 
+    @router.post("/sessions/{session_id}/start")
+    async def start_session(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        principal: Principal = Depends(extract_principal),
+    ) -> dict[str, Any]:
+        # Restart-only (contract §2.3): re-runs a STOPPED session in place. The
+        # guild aggregate owns /api/v1/forge, so /start must be proxied to the
+        # instance too — otherwise restart 404s through the aggregate.
+        instance, _ = await _find_session_owner(
+            service,
+            principal,
+            request,
+            session_id,
+            embedded_app=embedded_forge_app,
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="POST",
+            path=f"/sessions/{session_id}/start",
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        payload = response.json()
+        return _with_instance(payload, instance) if isinstance(payload, dict) else {}
+
     @router.patch("/sessions/{session_id}/archive")
     async def archive_session(
         request: Request,
