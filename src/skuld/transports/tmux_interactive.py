@@ -324,8 +324,9 @@ class TmuxInteractiveTransport(CLITransport):
         # In-flight post-Enter submit-confirm loops (fire-and-forget; cancelled on stop()).
         self._confirm_submit_tasks: set[asyncio.Task[None]] = set()
         # Assistant texts already emitted via MessageDisplay this turn (re-display dedup +
-        # the Stop-hook final-message twin guard).
+        # the Stop-hook final-message twin guard) + per-message flush accumulators.
         self._turn_displayed_texts: list[str] = []
+        self._display_msg_buffers: dict[str, str] = {}
         # Correlation FIFO of (msg_id, request_id, normalized_text) for each user
         # message pasted into the pane but not yet seen consumed by Claude. A steered
         # message lands in the CLI's own input queue and is inserted "at the right
@@ -780,6 +781,7 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_buffer = []
         self._turn_last_clean_text = ""
         self._turn_displayed_texts = []
+        self._display_msg_buffers = {}
         self._turn_prompt_text = ""
         # The watchdog captures the `_turn_done` Event it was started with. A fresh
         # turn always gets a freshly-created Event (above), so we MUST bind a live
@@ -1018,51 +1020,24 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_buffer = []
         self._turn_last_clean_text = ""
         self._turn_displayed_texts = []
-
-    @staticmethod
-    def _display_message_text(payload: dict[str, Any]) -> str:
-        """Pull the displayed ASSISTANT text out of a MessageDisplay hook payload.
-
-        Defensive across payload shapes: `message` may be a plain string, or a dict with a
-        `content` that is itself a string or an Anthropic-style block list; top-level `text` /
-        `content` fallbacks cover older builds. Returns "" for anything that is not
-        main-agent assistant prose (tool banners, system rows, sidechain messages)."""
-        message = payload.get("message")
-        if isinstance(message, str):
-            return message.strip()
-        candidates: list[Any] = []
-        if isinstance(message, dict):
-            role = str(message.get("role") or "assistant").lower()
-            if role != "assistant":
-                return ""
-            candidates.append(message.get("content"))
-            candidates.append(message.get("text"))
-        candidates.append(payload.get("text"))
-        candidates.append(payload.get("content"))
-        for candidate in candidates:
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
-            if isinstance(candidate, list):
-                texts = [
-                    str(block.get("text") or "")
-                    for block in candidate
-                    if isinstance(block, dict) and str(block.get("type") or "").lower() == "text"
-                ]
-                joined = "\n\n".join(t for t in texts if t.strip()).strip()
-                if joined:
-                    return joined
-        return ""
+        self._display_msg_buffers = {}
 
     async def _emit_message_display_from_hook(self, payload: dict[str, Any]) -> None:
-        """MessageDisplay hook → a whole-message assistant frame, MID-TURN.
+        """MessageDisplay hook → a whole-message assistant frame per displayed message, MID-TURN.
 
         This is the live channel for the agent's intermediary prose. Hook mode otherwise
         emits tools only (Pre/PostToolUse) plus ONE final message at Stop, so everything the
         agent says BETWEEN tool calls never streamed — clients saw tool cards appear while
-        the interleaved "normal messages" were dropped until the durable rebuild. Each
-        displayed assistant message is forwarded in order; the shared reducer folds it into
-        the pending turn, so live WS clients AND the durable conversation.turn both keep the
-        prose interleaved with the tools it sits between."""
+        the interleaved "normal messages" were dropped until the durable rebuild.
+
+        Wire shape (CLI ≥2.1.x): the hook fires PER FLUSH with ``turn_id``, ``message_id``
+        (stable across every flush of one message), ``index`` (0-based flush counter),
+        ``final`` (true exactly once, on the last flush) and ``delta`` (the newly completed
+        lines). Flushes are ACCUMULATED per message_id and ONE whole-message ``assistant``
+        frame is emitted on the final flush. Whole messages (not text deltas) on purpose:
+        the shared reducer folds an assistant frame's text into the durable turn's typed
+        ``parts`` — interleaved with the tool parts — whereas a text delta only grows the
+        flat ``content`` string and would VANISH from the durable interleaved transcript."""
         # Sidechain (subagent) prose has no top-level anchor in the main flow — skip it
         # (subagent tool frames already nest via parent attribution; prose attribution is
         # a separate feature).
@@ -1070,12 +1045,26 @@ class TmuxInteractiveTransport(CLITransport):
             return
         if self._coerce_str(payload.get("agent_id")) or self._coerce_str(payload.get("agentId")):
             return
-        text = self._display_message_text(payload)
-        if not text:
+        delta = payload.get("delta")
+        if not isinstance(delta, str) or not delta:
             return
-        # Mark FIRST: a fresh turn resets the displayed-texts list, so the dedup below never
+        # Mark FIRST: a fresh turn resets the display accumulators, so the dedup below never
         # misfires against the previous turn's prose.
         self._mark_semantic_turn_started()
+        message_id = self._coerce_str(payload.get("message_id")) or "current"
+        buffer = self._display_msg_buffers.get(message_id, "")
+        if buffer and not buffer.endswith("\n") and not delta.startswith("\n"):
+            buffer += "\n"
+        buffer += delta
+        if not payload.get("final"):
+            self._display_msg_buffers[message_id] = buffer
+            # Keep the watchdog fed while a long message is still flushing.
+            self._turn_last_output_at = time.monotonic()
+            return
+        self._display_msg_buffers.pop(message_id, None)
+        text = buffer.strip()
+        if not text:
+            return
         # De-dupe re-displays of the same message (TUI redraws, resumed panes) within a turn.
         if text in self._turn_displayed_texts:
             return
@@ -1092,6 +1081,7 @@ class TmuxInteractiveTransport(CLITransport):
                 "metadata": {
                     "source": "claude_hook",
                     "hook_event_name": "MessageDisplay",
+                    "claude_message_id": message_id,
                     "claude_session_id": payload.get("session_id"),
                     "transcript_path": payload.get("transcript_path"),
                 },
@@ -1620,7 +1610,8 @@ class TmuxInteractiveTransport(CLITransport):
         # (the reducer appends distinct segments; only an IDENTICAL trailing segment dedups,
         # and a tool frame may have landed in between). The result frame below still carries
         # the content either way.
-        if content and content not in self._turn_displayed_texts:
+        displayed = {self._normalize_prompt(t) for t in self._turn_displayed_texts}
+        if content and self._normalize_prompt(content) not in displayed:
             await self._emit(
                 {
                     "type": "assistant",
