@@ -541,10 +541,11 @@ async def test_message_display_hook_streams_interleaved_prose(tmp_path: Path) ->
         {
             "hook_event_name": "MessageDisplay",
             "session_id": "claude-session",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "Scanning the module now."}],
-            },
+            "turn_id": "turn-1",
+            "message_id": "msg-1",
+            "index": 0,
+            "final": True,
+            "delta": "Scanning the module now.",
         }
     )
     await transport.handle_claude_hook(
@@ -555,19 +556,42 @@ async def test_message_display_hook_streams_interleaved_prose(tmp_path: Path) ->
             "tool_use_id": "tool-1",
         }
     )
+    # A message displayed across TWO flushes → accumulated, ONE frame on the final flush.
     await transport.handle_claude_hook(
         {
             "hook_event_name": "MessageDisplay",
-            "session_id": "claude-session",
-            "message": {"role": "assistant", "content": "Found it — patching."},
+            "turn_id": "turn-1",
+            "message_id": "msg-2",
+            "index": 0,
+            "final": False,
+            "delta": "Found it —",
+        }
+    )
+    assert not [
+        e
+        for e in events
+        if e["type"] == "assistant"
+        and any(b.get("text") == "Found it —" for b in e["message"]["content"])
+    ], "a non-final flush must not emit"
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "turn-1",
+            "message_id": "msg-2",
+            "index": 1,
+            "final": True,
+            "delta": "patching.",
         }
     )
     # A TUI re-display of the SAME message must not duplicate the segment.
     await transport.handle_claude_hook(
         {
             "hook_event_name": "MessageDisplay",
-            "session_id": "claude-session",
-            "message": {"role": "assistant", "content": "Found it — patching."},
+            "turn_id": "turn-1",
+            "message_id": "msg-2b",
+            "index": 0,
+            "final": True,
+            "delta": "Found it —\npatching.",
         }
     )
 
@@ -578,7 +602,7 @@ async def test_message_display_hook_streams_interleaved_prose(tmp_path: Path) ->
         for block in e["message"]["content"]
         if block.get("type") == "text"
     ]
-    assert texts == ["Scanning the module now.", "Found it — patching."]
+    assert texts == ["Scanning the module now.", "Found it —\npatching."]
     # Ordering: prose frame → tool_use frame → prose frame (interleaved, not batched at Stop).
     kinds = [
         ("tool" if any(b.get("type") == "tool_use" for b in e["message"]["content"]) else "text")
@@ -600,7 +624,9 @@ async def test_stop_hook_skips_final_message_already_streamed_via_display(
     await transport.handle_claude_hook(
         {
             "hook_event_name": "MessageDisplay",
-            "message": {"role": "assistant", "content": "All done — tests green."},
+            "message_id": "msg-9",
+            "final": True,
+            "delta": "All done — tests green.",
         }
     )
     await transport.handle_claude_hook(
@@ -626,7 +652,9 @@ async def test_message_display_hook_drops_sidechain_prose(tmp_path: Path) -> Non
         {
             "hook_event_name": "MessageDisplay",
             "is_sidechain": True,
-            "message": {"role": "assistant", "content": "subagent chatter"},
+            "message_id": "sub-1",
+            "final": True,
+            "delta": "subagent chatter",
         }
     )
     assert not [e for e in events if e["type"] == "assistant"]
