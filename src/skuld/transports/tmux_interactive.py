@@ -1644,9 +1644,38 @@ class TmuxInteractiveTransport(CLITransport):
         # The turn ended — resolve any TTY prompt still pending (answered in-terminal or moot) so a
         # remote client dismisses its card rather than stranding it.
         await self._clear_pending_tty_prompts("turn_ended")
+        # …and flush any pasted message still awaiting its per-message UserPromptSubmit: the CLI
+        # batches queued steers into ONE submission (or absorbs them silently mid-turn), so the
+        # later ones never fire their own hook and their steering_state strands at "pending"
+        # (the greyed "queued" bubble that never flips) even though the reply addressed them.
+        await self._flush_stale_prompt_correlations("turn_ended")
         self._turn_active = False
         if self._turn_done is not None:
             self._turn_done.set()
+
+    async def _flush_stale_prompt_correlations(self, reason: str) -> None:
+        """Turn boundary: emit the consumed signal for every delivered message that never got
+        its own UserPromptSubmit correlation, so a batched/silently-absorbed steer cannot stay
+        'pending' after the turn that absorbed it ended. Uses the SAME event shape as the real
+        UserPromptSubmit path, so the broker's existing _activate_user_turn flips the bubble."""
+        if not self._pending_prompt_correlations:
+            return
+        stale = list(self._pending_prompt_correlations)
+        self._pending_prompt_correlations.clear()
+        for msg_id, request_id, norm in stale:
+            if not (msg_id or request_id):
+                continue
+            event: dict[str, Any] = {
+                "type": "terminal_prompt_submitted",
+                "event_type": "claude.prompt.submitted",
+                "prompt": norm,
+                "metadata": {"source": "turn_boundary_flush", "reason": reason},
+            }
+            if msg_id:
+                event["msg_id"] = msg_id
+            if request_id:
+                event["request_id"] = request_id
+            await self._emit(event)
 
     @staticmethod
     def _stringify_hook_value(value: Any) -> str:
@@ -2137,6 +2166,11 @@ class TmuxInteractiveTransport(CLITransport):
         # The turn ended — resolve any TTY prompt still pending (answered in-terminal or moot) so a
         # remote client dismisses its card rather than stranding it.
         await self._clear_pending_tty_prompts("turn_ended")
+        # …and flush any pasted message still awaiting its per-message UserPromptSubmit: the CLI
+        # batches queued steers into ONE submission (or absorbs them silently mid-turn), so the
+        # later ones never fire their own hook and their steering_state strands at "pending"
+        # (the greyed "queued" bubble that never flips) even though the reply addressed them.
+        await self._flush_stale_prompt_correlations("turn_ended")
         self._turn_active = False
         if self._turn_done is not None:
             self._turn_done.set()
