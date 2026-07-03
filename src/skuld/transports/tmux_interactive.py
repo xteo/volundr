@@ -1048,9 +1048,6 @@ class TmuxInteractiveTransport(CLITransport):
         delta = payload.get("delta")
         if not isinstance(delta, str) or not delta:
             return
-        # Mark FIRST: a fresh turn resets the display accumulators, so the dedup below never
-        # misfires against the previous turn's prose.
-        self._mark_semantic_turn_started()
         message_id = self._coerce_str(payload.get("message_id")) or "current"
         buffer = self._display_msg_buffers.get(message_id, "")
         if buffer and not buffer.endswith("\n") and not delta.startswith("\n"):
@@ -1058,13 +1055,23 @@ class TmuxInteractiveTransport(CLITransport):
         buffer += delta
         if not payload.get("final"):
             self._display_msg_buffers[message_id] = buffer
-            # Keep the watchdog fed while a long message is still flushing.
-            self._turn_last_output_at = time.monotonic()
+            if self._turn_active:
+                # Keep the watchdog fed while a long message is still flushing.
+                self._turn_last_output_at = time.monotonic()
             return
         self._display_msg_buffers.pop(message_id, None)
         text = buffer.strip()
         if not text:
             return
+        # LATE-FLUSH RACE (verified live): on a fast turn cycle the final display flush can
+        # land AFTER the Stop hook. The result path already carried this text into the turn
+        # (apply_result_content), so re-emitting it would fabricate a twin turn — and calling
+        # _mark_semantic_turn_started here would open a PHANTOM turn. Drop the echo; only a
+        # genuinely novel post-turn message (never carried by the last result) still emits.
+        if not self._turn_active:
+            last_result_text = str((self._last_result or {}).get("result") or "")
+            if self._normalize_prompt(text) == self._normalize_prompt(last_result_text):
+                return
         # De-dupe re-displays of the same message (TUI redraws, resumed panes) within a turn.
         if text in self._turn_displayed_texts:
             return
