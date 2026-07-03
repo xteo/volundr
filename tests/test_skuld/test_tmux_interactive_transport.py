@@ -1086,6 +1086,32 @@ async def test_ask_user_question_tool_surfaces_and_answers(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_turn_end_flushes_uncorrelated_steer_to_active(tmp_path: Path) -> None:
+    """The CLI batches queued steers into ONE UserPromptSubmit — the later message never
+    fires its own hook and used to strand at steering_state=pending forever. The turn-end
+    flush emits its consumed signal so the broker flips the bubble."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    events = await _collect_events(transport)
+    await transport.start()
+
+    await transport.send_message("first steer", msg_id="m-1")
+    await transport.send_message("second steer", msg_id="m-2")
+    # Claude consumed the FIRST via its own UserPromptSubmit hook…
+    await transport.handle_claude_hook(
+        {"hook_event_name": "UserPromptSubmit", "prompt": "first steer"}
+    )
+    # …but batched/absorbed the second (no per-message hook). Then the turn stops.
+    await transport.handle_claude_hook(
+        {"hook_event_name": "Stop", "last_assistant_message": "did both"}
+    )
+
+    submitted = [e for e in events if e["type"] == "terminal_prompt_submitted"]
+    assert [e.get("msg_id") for e in submitted] == ["m-1", "m-2"]
+    assert submitted[1]["metadata"]["source"] == "turn_boundary_flush"
+    await transport.stop()
+
+
+@pytest.mark.asyncio
 async def test_turn_end_resolves_stale_prompt(tmp_path: Path) -> None:
     transport = FakeTmuxInteractiveTransport(str(tmp_path))
     events = await _collect_events(transport)
