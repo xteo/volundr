@@ -288,9 +288,13 @@ class TmuxInteractiveTransport(CLITransport):
             "SKULD__TMUX_HOOK_EVENTS_ENABLED",
             bool(self._sdk_port),
         )
+        # Default ON with hook mode: MessageDisplay is the live channel for the agent's
+        # intermediary prose (hook mode otherwise emits tools only until Stop, so everything
+        # said BETWEEN tool calls never streamed). Env-off remains available if a CLI build
+        # floods it.
         self._message_display_hook_enabled = self._bool_env(
             "SKULD__TMUX_MESSAGE_DISPLAY_HOOK_ENABLED",
-            False,
+            self._hook_events_enabled,
         )
         # Remote Control (default ON): ALSO expose the live CLI on the host's claude.ai
         # login so the same session can be driven / observed from the Anthropic apps
@@ -317,6 +321,11 @@ class TmuxInteractiveTransport(CLITransport):
         self._initial_prompt_sent = False
         self._lifecycle_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
+        # In-flight post-Enter submit-confirm loops (fire-and-forget; cancelled on stop()).
+        self._confirm_submit_tasks: set[asyncio.Task[None]] = set()
+        # Assistant texts already emitted via MessageDisplay this turn (re-display dedup +
+        # the Stop-hook final-message twin guard).
+        self._turn_displayed_texts: list[str] = []
         # Correlation FIFO of (msg_id, request_id, normalized_text) for each user
         # message pasted into the pane but not yet seen consumed by Claude. A steered
         # message lands in the CLI's own input queue and is inserted "at the right
@@ -474,6 +483,9 @@ class TmuxInteractiveTransport(CLITransport):
                 with suppress(asyncio.CancelledError, Exception):
                     await self._turn_watchdog_task
                 self._turn_watchdog_task = None
+            for task in list(self._confirm_submit_tasks):
+                task.cancel()
+            self._confirm_submit_tasks.clear()
             for task in list(self._tail_tasks.values()):
                 task.cancel()
             for task in list(self._frame_tasks.values()):
@@ -767,6 +779,7 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_stream_started = False
         self._turn_buffer = []
         self._turn_last_clean_text = ""
+        self._turn_displayed_texts = []
         self._turn_prompt_text = ""
         # The watchdog captures the `_turn_done` Event it was started with. A fresh
         # turn always gets a freshly-created Event (above), so we MUST bind a live
@@ -952,6 +965,10 @@ class TmuxInteractiveTransport(CLITransport):
             await self._emit_permission_request_from_hook(payload)
             return True
 
+        if event_name == "MessageDisplay":
+            await self._emit_message_display_from_hook(payload)
+            return True
+
         if event_name == "SubagentStart":
             await self._surface_subagent_start(payload)
             return True
@@ -1000,6 +1017,86 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_stream_started = False
         self._turn_buffer = []
         self._turn_last_clean_text = ""
+        self._turn_displayed_texts = []
+
+    @staticmethod
+    def _display_message_text(payload: dict[str, Any]) -> str:
+        """Pull the displayed ASSISTANT text out of a MessageDisplay hook payload.
+
+        Defensive across payload shapes: `message` may be a plain string, or a dict with a
+        `content` that is itself a string or an Anthropic-style block list; top-level `text` /
+        `content` fallbacks cover older builds. Returns "" for anything that is not
+        main-agent assistant prose (tool banners, system rows, sidechain messages)."""
+        message = payload.get("message")
+        if isinstance(message, str):
+            return message.strip()
+        candidates: list[Any] = []
+        if isinstance(message, dict):
+            role = str(message.get("role") or "assistant").lower()
+            if role != "assistant":
+                return ""
+            candidates.append(message.get("content"))
+            candidates.append(message.get("text"))
+        candidates.append(payload.get("text"))
+        candidates.append(payload.get("content"))
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+            if isinstance(candidate, list):
+                texts = [
+                    str(block.get("text") or "")
+                    for block in candidate
+                    if isinstance(block, dict) and str(block.get("type") or "").lower() == "text"
+                ]
+                joined = "\n\n".join(t for t in texts if t.strip()).strip()
+                if joined:
+                    return joined
+        return ""
+
+    async def _emit_message_display_from_hook(self, payload: dict[str, Any]) -> None:
+        """MessageDisplay hook → a whole-message assistant frame, MID-TURN.
+
+        This is the live channel for the agent's intermediary prose. Hook mode otherwise
+        emits tools only (Pre/PostToolUse) plus ONE final message at Stop, so everything the
+        agent says BETWEEN tool calls never streamed — clients saw tool cards appear while
+        the interleaved "normal messages" were dropped until the durable rebuild. Each
+        displayed assistant message is forwarded in order; the shared reducer folds it into
+        the pending turn, so live WS clients AND the durable conversation.turn both keep the
+        prose interleaved with the tools it sits between."""
+        # Sidechain (subagent) prose has no top-level anchor in the main flow — skip it
+        # (subagent tool frames already nest via parent attribution; prose attribution is
+        # a separate feature).
+        if payload.get("is_sidechain") or payload.get("isSidechain"):
+            return
+        if self._coerce_str(payload.get("agent_id")) or self._coerce_str(payload.get("agentId")):
+            return
+        text = self._display_message_text(payload)
+        if not text:
+            return
+        # Mark FIRST: a fresh turn resets the displayed-texts list, so the dedup below never
+        # misfires against the previous turn's prose.
+        self._mark_semantic_turn_started()
+        # De-dupe re-displays of the same message (TUI redraws, resumed panes) within a turn.
+        if text in self._turn_displayed_texts:
+            return
+        self._turn_displayed_texts.append(text)
+        if len(self._turn_displayed_texts) > 32:
+            del self._turn_displayed_texts[:-32]
+        await self._emit(
+            {
+                "type": "assistant",
+                "message": {
+                    "model": self._model or "interactive",
+                    "content": [{"type": "text", "text": text}],
+                },
+                "metadata": {
+                    "source": "claude_hook",
+                    "hook_event_name": "MessageDisplay",
+                    "claude_session_id": payload.get("session_id"),
+                    "transcript_path": payload.get("transcript_path"),
+                },
+            }
+        )
 
     async def _emit_tool_use_from_hook(self, payload: dict[str, Any]) -> None:
         tool_name = self._coerce_str(payload.get("tool_name"))
@@ -1518,7 +1615,12 @@ class TmuxInteractiveTransport(CLITransport):
         is_error: bool = False,
     ) -> None:
         content = content.strip()
-        if content:
+        # Twin guard: when the MessageDisplay hook already streamed this exact final message
+        # mid-turn, re-emitting it here would append the same prose twice to the pending turn
+        # (the reducer appends distinct segments; only an IDENTICAL trailing segment dedups,
+        # and a tool frame may have landed in between). The result frame below still carries
+        # the content either way.
+        if content and content not in self._turn_displayed_texts:
             await self._emit(
                 {
                     "type": "assistant",
@@ -2093,6 +2195,70 @@ class TmuxInteractiveTransport(CLITransport):
         )
         if enter:
             await self._send_key("Enter", pane_id=target)
+            # Fire-and-forget: the confirm loop must not delay send_message's return (the
+            # send is non-blocking by contract) nor hold the send lock through its backoff.
+            task = asyncio.create_task(
+                self._confirm_submit(text, target),
+                name=f"tmux-confirm-submit-{self._session_name}",
+            )
+            self._confirm_submit_tasks.add(task)
+            task.add_done_callback(self._confirm_submit_tasks.discard)
+
+    # Backoff schedule for re-pressing Enter while the composer still holds the pasted text.
+    # The first check settles 0.25s after Enter (immediate captures still show the pre-submit
+    # composer); the total budget stays well inside _deliver_timeout_s AND the 0.5s
+    # send-is-non-blocking contract only pays the first hop (a cleared composer exits the loop).
+    _SUBMIT_RETRY_DELAYS_S = (0.25, 0.6, 1.2)
+
+    async def _confirm_submit(self, text: str, target: str) -> None:
+        """Re-press Enter (bounded) while the pasted text still sits in the composer.
+
+        A paste into a BUSY TUI (mid-turn steering) can race the Enter keystroke: the CLI
+        is still processing the bracketed paste when Enter lands, so the message stays
+        TYPED in the input box but never submits — the "first message goes through, later
+        steers hang as sent-but-pending" wedge (the paste returned OK, the broker acked
+        user_delivered, but UserPromptSubmit never fires and steering_state sticks at
+        pending). Submission is confirmed by the composer CLEARING (our text tail leaves
+        the bottom rows); while it hasn't, Enter is re-pressed with backoff. Guards:
+        an extra Enter on an empty/cleared composer is a no-op, we only retry while OUR
+        text is still visibly sitting in the input region, and we never press Enter when
+        an interactive selection menu is open (it would answer the menu).
+        """
+        needle = self._normalize_prompt(text)
+        if not needle:
+            return
+        needle = needle[-60:]
+        for delay in self._SUBMIT_RETRY_DELAYS_S:
+            await asyncio.sleep(delay)
+            state = await self._composer_state(needle, target)
+            if state != "holds":
+                return
+            logger.warning(
+                "tmux deliver: composer still holds the message %.1fs after Enter — re-pressing",
+                delay,
+            )
+            await self._send_key("Enter", pane_id=target)
+        if await self._composer_state(needle, target) == "holds":
+            logger.error(
+                "tmux deliver: message may not have submitted — composer still shows it "
+                "after %d Enter retries",
+                len(self._SUBMIT_RETRY_DELAYS_S),
+            )
+
+    async def _composer_state(self, needle: str, target: str) -> str:
+        """One bottom-of-pane observation: 'holds' when our text tail is still visible in
+        the input region and no selection menu is open; 'menu' when a menu row is visible
+        (never press Enter into it); 'clear' otherwise (submitted / can't tell)."""
+        snapshot = await self._run_tmux(
+            "capture-pane", "-p", "-S", "-12", "-t", target, check=False
+        )
+        if snapshot.returncode != 0:
+            return "clear"
+        rows = self._normalize_terminal_rows(snapshot.stdout)
+        if any(_MENU_ROW_RE.match(row) for row in rows):
+            return "menu"
+        joined = self._normalize_prompt(" ".join(rows))
+        return "holds" if needle in joined else "clear"
 
     async def _send_key(self, key: str, *, pane_id: str | None = None) -> None:
         target = self._target_pane(pane_id)
