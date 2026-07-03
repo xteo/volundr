@@ -124,7 +124,9 @@ async def test_start_creates_session_emits_init_and_pane(tmp_path: Path) -> None
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     assert "Stop" in settings["hooks"]
     assert "PreToolUse" in settings["hooks"]
-    assert "MessageDisplay" not in settings["hooks"]
+    # MessageDisplay is ON by default with hook mode — it is the live channel for the
+    # agent's intermediary prose (tools-only until Stop without it).
+    assert "MessageDisplay" in settings["hooks"]
 
     await transport.stop()
 
@@ -180,6 +182,69 @@ async def test_send_message_pastes_text_and_streams_turn(tmp_path: Path) -> None
     result = next(event for event in events if event["type"] == "result")
     assert result["stop_reason"] == "terminal_idle"
     assert result["result"] == "Claude says hi\nwith clean spacing"
+
+
+@pytest.mark.asyncio
+async def test_paste_represses_enter_while_composer_still_holds_text(tmp_path: Path) -> None:
+    """Submit-confirm: when the pane capture still shows the pasted text after Enter (the
+    busy-TUI race that left steers typed-but-unsubmitted), Enter is re-pressed with backoff."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    await _collect_events(transport)
+    await transport.start()
+
+    def enter_count() -> int:
+        return sum(
+            1
+            for args, _ in transport.commands
+            if args and args[0] == "send-keys" and args[-1] == "Enter"
+        )
+
+    transport.capture_stdout = "╭──────╮\n│ ❯ fix the fold bug please │\n╰──────╯\n"
+    await transport.send_message("fix the fold bug please")
+    # initial Enter + one retry per backoff hop (the fake composer never clears); the confirm
+    # loop runs in the background so send_message itself stays non-blocking.
+    expected = 1 + len(TmuxInteractiveTransport._SUBMIT_RETRY_DELAYS_S)
+    await _wait_until(lambda: enter_count() == expected, timeout=5.0)
+    await transport.stop()
+
+
+@pytest.mark.asyncio
+async def test_paste_confirm_never_presses_enter_into_open_menu(tmp_path: Path) -> None:
+    """An open selection menu means an extra Enter would ANSWER it — the confirm loop must
+    observe 'menu' and stand down, even though the composer text never visibly cleared."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    await _collect_events(transport)
+    await transport.start()
+
+    transport.capture_stdout = "Do you want to proceed?\n❯ 1. Allow\n  2. Deny\n"
+    await transport.send_message("run the migration")
+    await asyncio.sleep(1.0)  # past the first two backoff hops
+    enters = [
+        args
+        for args, _ in transport.commands
+        if args and args[0] == "send-keys" and args[-1] == "Enter"
+    ]
+    assert len(enters) == 1  # the submit Enter only — no blind retry into the menu
+    await transport.stop()
+
+
+@pytest.mark.asyncio
+async def test_paste_confirm_stops_after_composer_clears(tmp_path: Path) -> None:
+    """The normal path: the composer cleared by the first observation → exactly one Enter."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    await _collect_events(transport)
+    await transport.start()
+
+    transport.capture_stdout = "⏺ Working on it…\n"
+    await transport.send_message("hello there")
+    await asyncio.sleep(1.0)  # past the first two backoff hops
+    enters = [
+        args
+        for args, _ in transport.commands
+        if args and args[0] == "send-keys" and args[-1] == "Enter"
+    ]
+    assert len(enters) == 1
+    await transport.stop()
 
 
 @pytest.mark.asyncio
@@ -463,6 +528,108 @@ async def test_claude_stop_hook_emits_semantic_result(tmp_path: Path) -> None:
     assert usage, "completed turn must report non-empty modelUsage"
     out_tokens = next(iter(usage.values()))["outputTokens"]
     assert out_tokens >= 1
+
+
+@pytest.mark.asyncio
+async def test_message_display_hook_streams_interleaved_prose(tmp_path: Path) -> None:
+    """MessageDisplay → a whole-message assistant frame MID-TURN, interleaved with the tool
+    hooks — the live channel for the agent's 'normal messages' between tool calls."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    events = await _collect_events(transport)
+
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "session_id": "claude-session",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Scanning the module now."}],
+            },
+        }
+    )
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "swift test"},
+            "tool_use_id": "tool-1",
+        }
+    )
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "session_id": "claude-session",
+            "message": {"role": "assistant", "content": "Found it — patching."},
+        }
+    )
+    # A TUI re-display of the SAME message must not duplicate the segment.
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "session_id": "claude-session",
+            "message": {"role": "assistant", "content": "Found it — patching."},
+        }
+    )
+
+    assistants = [e for e in events if e["type"] == "assistant"]
+    texts = [
+        block["text"]
+        for e in assistants
+        for block in e["message"]["content"]
+        if block.get("type") == "text"
+    ]
+    assert texts == ["Scanning the module now.", "Found it — patching."]
+    # Ordering: prose frame → tool_use frame → prose frame (interleaved, not batched at Stop).
+    kinds = [
+        ("tool" if any(b.get("type") == "tool_use" for b in e["message"]["content"]) else "text")
+        for e in assistants
+    ]
+    assert kinds == ["text", "tool", "text"]
+    assert transport.is_turn_active  # prose alone marks the semantic turn started
+
+
+@pytest.mark.asyncio
+async def test_stop_hook_skips_final_message_already_streamed_via_display(
+    tmp_path: Path,
+) -> None:
+    """The Stop twin guard: when MessageDisplay already streamed the final message, Stop
+    must not emit the same prose a second time — but the result frame still carries it."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    events = await _collect_events(transport)
+
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "message": {"role": "assistant", "content": "All done — tests green."},
+        }
+    )
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "Stop",
+            "last_assistant_message": "All done — tests green.",
+        }
+    )
+
+    assistants = [e for e in events if e["type"] == "assistant"]
+    assert len(assistants) == 1  # the MessageDisplay emission only
+    result = next(e for e in events if e["type"] == "result")
+    assert result["result"] == "All done — tests green."
+
+
+@pytest.mark.asyncio
+async def test_message_display_hook_drops_sidechain_prose(tmp_path: Path) -> None:
+    """Subagent (sidechain) prose has no main-flow anchor — it must not interleave."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    events = await _collect_events(transport)
+
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "is_sidechain": True,
+            "message": {"role": "assistant", "content": "subagent chatter"},
+        }
+    )
+    assert not [e for e in events if e["type"] == "assistant"]
 
 
 def test_remote_control_on_by_default_adds_flag(tmp_path: Path, monkeypatch) -> None:
