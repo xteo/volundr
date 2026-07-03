@@ -643,6 +643,36 @@ async def test_stop_hook_skips_final_message_already_streamed_via_display(
 
 
 @pytest.mark.asyncio
+async def test_late_display_flush_after_stop_drops_result_echo(tmp_path: Path) -> None:
+    """Fast turn cycle (verified live): the final MessageDisplay flush can land AFTER the
+    Stop hook. The result already carried that text, so the late echo must be dropped —
+    no twin assistant frame, and no phantom turn opened."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    events = await _collect_events(transport)
+
+    await transport.handle_claude_hook(
+        {"hook_event_name": "UserPromptSubmit", "prompt": "quick one"}
+    )
+    await transport.handle_claude_hook(
+        {"hook_event_name": "Stop", "last_assistant_message": "quick answer"}
+    )
+    assert not transport.is_turn_active
+    frames_after_stop = len(events)
+
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "MessageDisplay",
+            "message_id": "late-1",
+            "final": True,
+            "delta": "quick answer",
+        }
+    )
+    assert not transport.is_turn_active, "a late display echo must not open a phantom turn"
+    late = [e for e in events[frames_after_stop:] if e["type"] == "assistant"]
+    assert not late, "the result already carried this text — no twin frame"
+
+
+@pytest.mark.asyncio
 async def test_message_display_hook_drops_sidechain_prose(tmp_path: Path) -> None:
     """Subagent (sidechain) prose has no main-flow anchor — it must not interleave."""
     transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
