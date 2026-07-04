@@ -70,6 +70,56 @@ def _content_preview(content: Any) -> str:
     return ""
 
 
+def _coerce_int(value: Any) -> int | None:
+    """A JSON number → int (drops bools/None/non-numeric), for image dimensions."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _content_image_info(content: Any) -> tuple[bool, str | None, int | None, int | None]:
+    """Detect an image ``tool_result`` and return ``(is_image, mime, width, height)``.
+
+    A Skuld ``Read`` of an image returns ``content`` as a JSON STRING encoding the
+    envelope ``{"type":"image","file":{"base64":…,"type":"image/png","dimensions":
+    {"displayWidth":…,"displayHeight":…}}}``. We JSON-decode a string first. The
+    Anthropic content-array form ``[{"type":"image","source":{"media_type":…}}]`` is
+    tolerated defensively. Anything else → ``(False, None, None, None)``.
+
+    Pure + cheap (no image bytes decoded) — this is what lets an elided placeholder
+    carry an image hint so the client can render a thumbnail chip WITHOUT fetching the
+    (always-elided, >1 KB) base64 payload.
+    """
+    parsed = content
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except (TypeError, ValueError):
+            return (False, None, None, None)
+    if isinstance(parsed, dict) and parsed.get("type") == "image":
+        file = parsed.get("file")
+        if isinstance(file, dict):
+            mime = file.get("type")
+            dims = file.get("dimensions")
+            width = height = None
+            if isinstance(dims, dict):
+                width = _coerce_int(dims.get("displayWidth"))
+                height = _coerce_int(dims.get("displayHeight"))
+            return (True, mime if isinstance(mime, str) else None, width, height)
+        return (True, None, None, None)
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict) and item.get("type") == "image":
+                source = item.get("source")
+                mime = source.get("media_type") if isinstance(source, dict) else None
+                return (True, mime if isinstance(mime, str) else None, None, None)
+    return (False, None, None, None)
+
+
 def is_elided_block(block: Any) -> bool:
     """True when ``block`` is a shallow tool_result placeholder (content dropped)."""
     return (
@@ -92,7 +142,7 @@ def elide_tool_result_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT
     byte_size = _content_byte_size(content)
     if byte_size <= inline_limit:
         return block
-    return {
+    placeholder = {
         "type": "tool_result",
         "tool_use_id": block.get("tool_use_id", ""),
         "is_error": bool(block.get("is_error", False)),
@@ -100,6 +150,20 @@ def elide_tool_result_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT
         "byte_size": byte_size,
         "preview": _content_preview(content),
     }
+    # IMAGE HINT: an image Read is always > 1 KB (base64) so it is ALWAYS elided, and the
+    # placeholder above carries no type signal (the preview is a truncated base64 blob). Stamp
+    # is_image / mime_type / dimensions so the client can hoist a thumbnail chip and size it by
+    # aspect ratio WITHOUT fetching the payload. Additive — omitted entirely for non-images.
+    is_image, mime, width, height = _content_image_info(content)
+    if is_image:
+        placeholder["is_image"] = True
+        if mime:
+            placeholder["mime_type"] = mime
+        if width is not None:
+            placeholder["img_w"] = width
+        if height is not None:
+            placeholder["img_h"] = height
+    return placeholder
 
 
 def elide_parts(parts: Any, *, inline_limit: int = INLINE_BYTE_LIMIT) -> Any:
