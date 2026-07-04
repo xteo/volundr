@@ -16,6 +16,7 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -151,6 +152,68 @@ def _sanitize_log(value: object) -> str:
 def _non_empty_str(value: object) -> str:
     """Return a stripped string or an empty string for absent/non-string values."""
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+# Teammate panes (agent-teams mode) are all splits of the ONE window the session creates, which is
+# literally named "main" — so window_name is a useless identity for a teammate. These fallbacks give
+# each teammate a name that is at worst unique ("Teammate <index>") and never "main".
+_GENERIC_PANE_TITLES = {"", "main", "window", "pane", "bash", "zsh", "sh", "fish"}
+# A pane title / current_command that identifies a RUNTIME rather than a teammate. Naming every
+# teammate after its runtime ("node", "claude") would just reintroduce the all-rows-identical bug we
+# are fixing, so these are rejected in favour of the indexed "Teammate <n>" fallback.
+_GENERIC_PANE_COMMANDS = {
+    "",
+    "bash",
+    "zsh",
+    "sh",
+    "fish",
+    "-bash",
+    "-zsh",
+    "-sh",
+    "login",
+    "tmux",
+    "node",
+    "claude",
+    "python",
+    "python3",
+}
+
+
+def _short_hostname() -> str:
+    """The box's short hostname, lowered — tmux defaults an unset ``pane_title`` to this, so we must
+    recognise and reject it rather than label every teammate with the machine name."""
+    try:
+        return socket.gethostname().split(".", 1)[0].strip().lower()
+    except Exception:
+        return ""
+
+
+def _is_meaningful_pane_title(title: str, window_name: str) -> bool:
+    """True when a tmux ``pane_title`` carries a real per-teammate identity (something the teammate
+    set), not a generic/default value we should ignore."""
+    lowered = title.strip().lower()
+    if lowered in _GENERIC_PANE_TITLES:
+        return False
+    if lowered.startswith(("pane ", "window ")):
+        return False
+    if window_name and lowered == window_name.strip().lower():
+        return False
+    host = _short_hostname()
+    return not (host and lowered == host)
+
+
+def _teammate_pane_name(data: dict[str, Any]) -> str:
+    """A human identity for a teammate pane. Fallback chain: a meaningful ``pane_title`` → a
+    concrete ``current_command`` (not a shell/runtime) → ``Teammate <index>``. Never the window."""
+    window_name = str(data.get("window_name") or "")
+    title = str(data.get("pane_title") or "").strip()
+    if title and _is_meaningful_pane_title(title, window_name):
+        return title
+    command = str(data.get("current_command") or "").strip()
+    if command and command.lower() not in _GENERIC_PANE_COMMANDS:
+        return command
+    pane_index = str(data.get("pane_index", "")).strip()
+    return f"Teammate {pane_index}" if pane_index else "Teammate"
 
 
 def _describe_browser_content_block(block: dict[str, Any]) -> str | None:
@@ -1113,6 +1176,10 @@ class Broker:
         # and so GET /api/plan / GET /api/agents can answer from live state.
         self._current_plan: dict[str, Any] | None = None
         self._running_agents: dict[str, dict[str, Any]] = {}
+        # pane_id of the primary REPL pane, captured from the first index-0 pane we see. Keying the
+        # primary by its STABLE id (not the brittle live pane_index, which tmux can renumber) stops
+        # a teammate pane from ever being misclassified as the primary — or vice-versa.
+        self._primary_pane_id: str | None = None
 
         # Mesh adapter — only active when mesh.enabled is True
         self._mesh_adapter: Any = None
@@ -2951,12 +3018,16 @@ class Broker:
     def _track_pane_agent(self, data: dict[str, Any], *, opened: bool) -> None:
         """Treat a non-primary tmux pane as a teammate agent (agent-teams mode).
 
-        The primary pane (index 0) is the main Claude REPL, not a teammate.
+        The primary pane is the main Claude REPL, not a teammate. We key it by the pane_id of the
+        first index-0 pane we ever see (stable across tmux pane renumbering) rather than the live
+        pane_index on every event.
         """
         pane_id = str(data.get("pane_id") or "")
         if not pane_id:
             return
-        if str(data.get("pane_index", "")) == "0":
+        if opened and self._primary_pane_id is None and str(data.get("pane_index", "")) == "0":
+            self._primary_pane_id = pane_id
+        if self._is_primary_pane(pane_id, data.get("pane_index")):
             return
         if not opened:
             self._running_agents.pop(pane_id, None)
@@ -2964,10 +3035,38 @@ class Broker:
         self._running_agents[pane_id] = {
             "id": pane_id,
             "kind": "teammate",
-            "name": str(data.get("window_name") or f"pane {data.get('pane_index')}"),
+            "name": _teammate_pane_name(data),
             "status": "running",
             "current_command": str(data.get("current_command") or ""),
         }
+
+    def _is_primary_pane(self, pane_id: str, pane_index: Any) -> bool:
+        """The primary REPL pane. Matched by its captured pane_id once known; before that (the very
+        first events) we fall back to the index-0 convention."""
+        if self._primary_pane_id is not None:
+            return pane_id == self._primary_pane_id
+        return str(pane_index if pane_index is not None else "") == "0"
+
+    def _reap_dead_teammates(self) -> None:
+        """Belt-and-suspenders: drop teammate rows whose tmux pane no longer exists. Event-driven
+        dead-pane eviction (the transport) is the primary fix; this catches any teammate row that
+        outlived its pane (a missed/dropped close event) at serve/replay time. Only touches
+        ``teammate`` rows keyed by pane_id, and only when the active transport can report live panes
+        (the tmux interactive one) — otherwise it no-ops."""
+        live = getattr(self._transport, "live_pane_ids", None)
+        if live is None:
+            return
+        try:
+            live_ids = set(live)
+        except TypeError:
+            return
+        stale = [
+            agent_id
+            for agent_id, agent in self._running_agents.items()
+            if agent.get("kind") == "teammate" and agent_id not in live_ids
+        ]
+        for agent_id in stale:
+            self._running_agents.pop(agent_id, None)
 
     async def _send_permission_control_response(
         self,
@@ -6175,6 +6274,7 @@ class Broker:
             if self._current_plan is not None:
                 if not await self._safe_browser_send_json(websocket, self._current_plan):
                     return
+            self._reap_dead_teammates()
             if self._running_agents:
                 logger.info(
                     "Replaying %d running agent(s) to new browser",
@@ -6681,6 +6781,7 @@ async def get_plan() -> dict:
 @app.get("/api/agents")
 async def get_agents() -> dict:
     """Agents/sub-processes running in this session: Task subagents + teammate panes."""
+    broker._reap_dead_teammates()
     return {"agents": list(broker._running_agents.values())}
 
 

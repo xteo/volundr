@@ -167,6 +167,10 @@ class _PaneState:
     cursor_x: int
     cursor_y: int
     log_path: Path
+    # tmux #{pane_title}: a per-pane identity a teammate can set (OSC title). Empty/default for the
+    # primary REPL; forwarded so the broker can name teammate panes by something other than the
+    # single shared window ("main").
+    pane_title: str = ""
 
 
 class TmuxCommandError(RuntimeError):
@@ -1849,7 +1853,7 @@ class TmuxInteractiveTransport(CLITransport):
             (
                 "#{pane_id}\t#{pane_index}\t#{window_name}\t#{pane_active}\t"
                 "#{pane_current_command}\t#{pane_width}\t#{pane_height}\t"
-                "#{cursor_x}\t#{cursor_y}"
+                "#{cursor_x}\t#{cursor_y}\t#{pane_dead}\t#{pane_title}"
             ),
             check=False,
         )
@@ -1876,6 +1880,19 @@ class TmuxInteractiveTransport(CLITransport):
             height = self._coerce_int(parts[6] if len(parts) > 6 else None, 50)
             cursor_x = self._coerce_int(parts[7] if len(parts) > 7 else None, 0)
             cursor_y = self._coerce_int(parts[8] if len(parts) > 8 else None, 0)
+            pane_dead = (parts[9].strip() if len(parts) > 9 else "") == "1"
+            # pane_title is last so an (unlikely) embedded tab is recovered intact.
+            pane_title = "\t".join(parts[10:]).strip() if len(parts) > 10 else ""
+
+            # DEAD pane: a corpse left listed by `remain-on-exit on` (kept for the primary REPL's
+            # crash forensics). It never vanishes from `list-panes`, so the disappearance sweep
+            # below would never fire — treat a dead pane as CLOSED here: evict tracking + emit close
+            # event ONCE. A pane that is already dead the first time we see it was never registered,
+            # so _evict_pane simply no-ops (no phantom open, no owed close).
+            if pane_dead:
+                await self._evict_pane(pane_id, window_name=window_name, emit_events=emit_events)
+                continue
+
             seen.add(pane_id)
             pane = _PaneState(
                 pane_id=pane_id,
@@ -1888,6 +1905,7 @@ class TmuxInteractiveTransport(CLITransport):
                 cursor_x=cursor_x,
                 cursor_y=cursor_y,
                 log_path=self._pane_log_path(pane_id),
+                pane_title=pane_title,
             )
             is_new = pane_id not in self._panes
             self._panes[pane_id] = pane
@@ -1897,23 +1915,34 @@ class TmuxInteractiveTransport(CLITransport):
                     await self._emit_pane_opened(pane)
 
         for pane_id in set(self._panes) - seen:
-            pane = self._panes.pop(pane_id)
-            task = self._tail_tasks.pop(pane_id, None)
-            if task is not None:
-                task.cancel()
-            frame_task = self._frame_tasks.pop(pane_id, None)
-            if frame_task is not None:
-                frame_task.cancel()
-            self._last_frame_signature.pop(pane_id, None)
-            self._pane_sequences.pop(pane_id, None)
-            if emit_events:
-                await self._emit(
-                    {
-                        "type": "terminal_pane_closed",
-                        "pane_id": pane_id,
-                        "window_name": pane.window_name,
-                    }
-                )
+            await self._evict_pane(pane_id, emit_events=emit_events)
+
+    async def _evict_pane(
+        self, pane_id: str, *, window_name: str | None = None, emit_events: bool
+    ) -> None:
+        """Stop tracking a pane and emit a single ``terminal_pane_closed``. Shared by the two ways a
+        pane leaves: it VANISHED from ``list-panes`` (normal close), or it went DEAD-but-listed
+        under ``remain-on-exit``. A never-registered pane no-ops, so a dead pane we never opened
+        stays unregistered and owes no close event."""
+        pane = self._panes.pop(pane_id, None)
+        if pane is None:
+            return
+        task = self._tail_tasks.pop(pane_id, None)
+        if task is not None:
+            task.cancel()
+        frame_task = self._frame_tasks.pop(pane_id, None)
+        if frame_task is not None:
+            frame_task.cancel()
+        self._last_frame_signature.pop(pane_id, None)
+        self._pane_sequences.pop(pane_id, None)
+        if emit_events:
+            await self._emit(
+                {
+                    "type": "terminal_pane_closed",
+                    "pane_id": pane_id,
+                    "window_name": window_name if window_name is not None else pane.window_name,
+                }
+            )
 
     async def _start_pipe_for_pane(self, pane: _PaneState) -> None:
         pane.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2397,11 +2426,18 @@ class TmuxInteractiveTransport(CLITransport):
                 "pane_id": pane.pane_id,
                 "pane_index": pane.pane_index,
                 "window_name": pane.window_name,
+                "pane_title": pane.pane_title,
                 "active": pane.active,
                 "current_command": pane.current_command,
                 "log_path": str(pane.log_path),
             }
         )
+
+    @property
+    def live_pane_ids(self) -> set[str]:
+        """Pane ids currently tracked (registered, not evicted/dead). Lets the broker reap teammate
+        rows whose pane no longer exists as a belt-and-suspenders over event-driven eviction."""
+        return set(self._panes)
 
     async def _has_session(self) -> bool:
         result = await self._run_tmux("has-session", "-t", self._session_name, check=False)
