@@ -3032,10 +3032,14 @@ class Broker:
         if not opened:
             self._running_agents.pop(pane_id, None)
             return
+        # The pane's `--agent-name` (agent-teams) is the authoritative teammate identity — it is the
+        # name the TeammateIdle finish signal uses. Prefer it; fall back to the pane title/command
+        # chain for older CLIs or non-teammate splits that don't carry one.
+        agent_name = str(data.get("agent_name") or "").strip()
         self._running_agents[pane_id] = {
             "id": pane_id,
             "kind": "teammate",
-            "name": _teammate_pane_name(data),
+            "name": agent_name or _teammate_pane_name(data),
             "status": "running",
             "current_command": str(data.get("current_command") or ""),
         }
