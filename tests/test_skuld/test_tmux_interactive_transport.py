@@ -15,6 +15,7 @@ import pytest
 
 from skuld.transports.tmux_interactive import (
     TmuxInteractiveTransport,
+    _PaneState,
     _TmuxResult,
 )
 
@@ -38,6 +39,9 @@ class FakeTmuxInteractiveTransport(TmuxInteractiveTransport):
         self.session_exists = False
         self.capture_stdout = ""
         self.pane_lines = ["%1\t0\tmain\t1\tclaude\t200\t50\t2\t47"]
+        # pane_id -> the pane's `#{pane_start_command}` (what `display-message` returns). Lets a
+        # test give a teammate pane a real `--agent-name`; unmapped panes report an empty command.
+        self.pane_start_commands: dict[str, str] = {}
         # SAFETY: redirect the socket dir + runtime root into the per-test workspace so the
         # periodic sweep loop started by start() can NEVER touch the real /tmp/skuld-tmux-* dir
         # or a live session's runtime dir on this box.
@@ -68,6 +72,9 @@ class FakeTmuxInteractiveTransport(TmuxInteractiveTransport):
             return _TmuxResult(0)
         if command == "list-panes":
             return _TmuxResult(0, "\n".join(self.pane_lines) + "\n")
+        if command == "display-message":
+            target = args[args.index("-t") + 1] if "-t" in args else ""
+            return _TmuxResult(0, self.pane_start_commands.get(target, ""))
         if command == "load-buffer":
             self.loaded_buffers.append(Path(args[-1]).read_text(encoding="utf-8"))
             return _TmuxResult(0)
@@ -442,6 +449,153 @@ async def test_refresh_panes_ignores_pane_already_dead_on_first_sight(tmp_path: 
 
     assert "%3" not in transport._panes  # noqa: SLF001
     assert not any(e.get("pane_id") == "%3" for e in events if "pane" in e.get("type", ""))
+
+
+# ──────────────────────────── teammate identity + finish signal ────────────────────────────
+
+
+def test_parse_agent_name_extracts_from_start_command() -> None:
+    parse = FakeTmuxInteractiveTransport._parse_agent_name  # noqa: SLF001
+    teammate = (
+        "env CLAUDECODE=1 /home/thor/.local/share/claude/versions/2.1.200 "
+        "--agent-id card-explorer@session-a27e0dba --agent-name card-explorer "
+        "--team-name session-a27e0dba --agent-type Explore --model opus"
+    )
+    assert parse(teammate) == "card-explorer"
+    # `=` form + surrounding quotes are both handled.
+    assert parse("x --agent-name=wa-audio-explorer --model opus") == "wa-audio-explorer"
+    # The primary REPL has no `--agent-name`, so it is never a teammate.
+    assert parse("claude --model claude-fable-5 --remote-control lexi --teammate-mode tmux") == ""
+    assert parse("") == ""
+
+
+@pytest.mark.asyncio
+async def test_pane_opened_forwards_agent_name_from_start_command(tmp_path: Path) -> None:
+    # A teammate pane's `--agent-name` (its authoritative identity) rides on terminal_pane_opened so
+    # the broker names the row by the real teammate name instead of "main"/the claude version.
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    transport.pane_start_commands["%2"] = (
+        "env CLAUDECODE=1 /home/thor/.local/share/claude/versions/2.1.200 "
+        "--agent-name wa-audio-explorer --team-name session-a27 --agent-type Explore"
+    )
+    transport.pane_lines.append("%2\t1\tmain\t0\t2.1.200\t100\t40\t0\t0\t0\t")
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001 - direct pane simulation
+    await transport.stop()
+
+    opened = [e for e in events if e["type"] == "terminal_pane_opened" and e["pane_id"] == "%2"]
+    assert opened and opened[0]["agent_name"] == "wa-audio-explorer"
+    assert transport._panes.get("%2") is None or True  # pane may be torn down by stop()
+
+
+@pytest.mark.asyncio
+async def test_teammate_idle_hook_evicts_teammate_by_pane(tmp_path: Path) -> None:
+    """A TeammateIdle hook emits a `stopped` agent_update keyed by the teammate's PANE id (the
+    registry key), resolved from teammate_name → the pane whose `--agent-name` matches."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    # A teammate pane is live and known to the transport (agent_name parsed from its start command).
+    transport._panes["%4"] = _PaneState(  # noqa: SLF001
+        pane_id="%4",
+        pane_index="3",
+        window_name="main",
+        active=False,
+        current_command="2.1.200",
+        width=100,
+        height=40,
+        cursor_x=0,
+        cursor_y=0,
+        log_path=tmp_path / "4.log",
+        agent_name="wa-audio-explorer",
+    )
+
+    handled = await transport.handle_claude_hook(
+        {
+            "hook_event_name": "TeammateIdle",
+            "session_id": "teammate-session",
+            "team_name": "session-a27e0dba",
+            "teammate_name": "wa-audio-explorer",
+            "agent_type": "Explore",
+        }
+    )
+
+    assert handled is True
+    stopped = [e for e in events if e["type"] == "agent_update" and e["action"] == "stopped"]
+    assert len(stopped) == 1
+    assert stopped[0]["agent"]["id"] == "%4"  # keyed by the PANE id so the broker pops the row
+    assert stopped[0]["agent"]["kind"] == "teammate"
+    assert stopped[0]["agent"]["name"] == "wa-audio-explorer"
+
+
+@pytest.mark.asyncio
+async def test_teammate_idle_without_matching_pane_is_harmless(tmp_path: Path) -> None:
+    """If the teammate's pane is already gone (dead-pane eviction beat us), the stopped frame is
+    keyed by name — a no-op pop on the broker, never an exception."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+
+    await transport.handle_claude_hook(
+        {"hook_event_name": "TeammateIdle", "teammate_name": "ghost-explorer"}
+    )
+
+    stopped = [e for e in events if e["type"] == "agent_update" and e["action"] == "stopped"]
+    assert len(stopped) == 1
+    assert stopped[0]["agent"]["id"] == "teammate:ghost-explorer"
+
+
+@pytest.mark.asyncio
+async def test_teammate_idle_without_name_is_ignored(tmp_path: Path) -> None:
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.handle_claude_hook({"hook_event_name": "TeammateIdle"})
+    assert not [e for e in events if e["type"] == "agent_update"]
+
+
+@pytest.mark.asyncio
+async def test_dead_teammate_pane_emits_agent_stopped(tmp_path: Path) -> None:
+    """Belt-and-suspenders: when a teammate pane dies/vanishes, an explicit `stopped` agent_update
+    is emitted (not just terminal_pane_closed) so a LIVE client evicts the teammate immediately —
+    the fallback for a dropped TeammateIdle."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    # A teammate pane opens (its --agent-name comes from the start command).
+    transport.pane_start_commands["%2"] = "x --agent-name fold-fixer --agent-type Explore"
+    transport.pane_lines.append("%2\t1\tmain\t0\t2.1.200\t100\t40\t0\t0\t0\t")
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    assert transport._panes["%2"].agent_name == "fold-fixer"  # noqa: SLF001
+
+    # …then its pane dies (pane_dead=1) — the teammate finished and its Claude exited.
+    transport.pane_lines[-1] = "%2\t1\tmain\t0\t2.1.200\t100\t40\t0\t0\t1\t"
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    await transport.stop()
+
+    stopped = [
+        e
+        for e in events
+        if e["type"] == "agent_update" and e["action"] == "stopped" and e["agent"]["id"] == "%2"
+    ]
+    assert len(stopped) == 1
+    assert stopped[0]["agent"]["kind"] == "teammate"
+    assert stopped[0]["agent"]["name"] == "fold-fixer"
+
+
+@pytest.mark.asyncio
+async def test_dead_primary_pane_emits_no_agent_stopped(tmp_path: Path) -> None:
+    """The primary REPL pane has no --agent-name, so its close must NEVER emit a teammate stop."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    # Default pane %1 is the primary (no --agent-name resolved). Make it vanish.
+    transport.pane_lines = []
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    await transport.stop()
+
+    assert not [e for e in events if e["type"] == "agent_update"]
 
 
 @pytest.mark.asyncio

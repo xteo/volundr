@@ -171,6 +171,12 @@ class _PaneState:
     # primary REPL; forwarded so the broker can name teammate panes by something other than the
     # single shared window ("main").
     pane_title: str = ""
+    # The `--agent-name` from the pane's start command (agent-teams teammates only). This is the
+    # STABLE, authoritative teammate identity — it matches the `teammate_name` on the TeammateIdle
+    # hook, so it is both the display name AND the key that lets an idle/finished teammate be
+    # correlated back to its pane_id (the agents registry is keyed by pane_id). Empty for the
+    # primary REPL pane and any non-teammate split.
+    agent_name: str = ""
 
 
 class TmuxCommandError(RuntimeError):
@@ -983,6 +989,15 @@ class TmuxInteractiveTransport(CLITransport):
             await self._surface_subagent_stop(payload)
             return True
 
+        if event_name == "TeammateIdle":
+            # An agent-teams teammate finished its current work and went idle. Its split pane stays
+            # ALIVE (idling for the next message), so neither #{pane_dead} eviction nor the vanished
+            # sweep will ever reap it — this hook is the ONLY "teammate finished" signal, and it was
+            # previously dropped. Evict the teammate so a running/reconnecting session shows only
+            # CURRENTLY active teammates, never idle corpses lifted on replay.
+            await self._finish_teammate_from_idle(payload)
+            return True
+
         if event_name == "Stop":
             await self._finish_hook_turn(
                 content=self._coerce_str(payload.get("last_assistant_message")),
@@ -1360,6 +1375,31 @@ class TmuxInteractiveTransport(CLITransport):
         reason = self._coerce_str(payload.get("reason")).lower()
         is_error = reason in {"failed", "error", "interrupted"} or bool(payload.get("error"))
         await self._finish_agent(self._resolve_agent_id(payload), is_error=is_error)
+
+    async def _finish_teammate_from_idle(self, payload: dict[str, Any]) -> None:
+        """A TeammateIdle hook → evict the teammate from the running-agents registry.
+
+        The registry keys teammates by ``pane_id`` (from ``terminal_pane_opened``), but the hook
+        identifies the teammate by ``teammate_name`` (== the pane's ``--agent-name``). We resolve
+        the pane by that name and emit a ``stopped`` ``agent_update`` on the SAME pane_id key so the
+        broker's existing ``_track_agent_update`` pops the corpse. If the pane is already gone the
+        stopped frame is keyed by name — harmless (dead-pane eviction already handled that case)."""
+        teammate_name = self._coerce_str(payload.get("teammate_name"))
+        if not teammate_name:
+            return
+        pane_id = next(
+            (pid for pid, pane in self._panes.items() if pane.agent_name == teammate_name),
+            None,
+        )
+        await self._emit_agent_update(
+            {
+                "id": pane_id or f"teammate:{teammate_name}",
+                "kind": "teammate",
+                "name": teammate_name,
+                "status": "done",
+            },
+            action="stopped",
+        )
 
     async def _emit_agent_update(self, agent: dict[str, Any], *, action: str) -> None:
         await self._emit(
@@ -1894,6 +1934,13 @@ class TmuxInteractiveTransport(CLITransport):
                 continue
 
             seen.add(pane_id)
+            existing = self._panes.get(pane_id)
+            is_new = existing is None
+            # `--agent-name` is immutable per pane, so resolve it once (a targeted tmux query, kept
+            # off the multi-line `list-panes` format) and carry it forward on later polls.
+            agent_name = (
+                await self._resolve_pane_agent_name(pane_id) if is_new else existing.agent_name
+            )
             pane = _PaneState(
                 pane_id=pane_id,
                 pane_index=pane_index,
@@ -1906,8 +1953,8 @@ class TmuxInteractiveTransport(CLITransport):
                 cursor_y=cursor_y,
                 log_path=self._pane_log_path(pane_id),
                 pane_title=pane_title,
+                agent_name=agent_name,
             )
-            is_new = pane_id not in self._panes
             self._panes[pane_id] = pane
             if is_new:
                 await self._start_pipe_for_pane(pane)
@@ -1916,6 +1963,31 @@ class TmuxInteractiveTransport(CLITransport):
 
         for pane_id in set(self._panes) - seen:
             await self._evict_pane(pane_id, emit_events=emit_events)
+
+    async def _resolve_pane_agent_name(self, pane_id: str) -> str:
+        """Read the pane's `--agent-name` from its start command (agent-teams teammates only).
+
+        Queried per-pane via ``display-message`` rather than folded into the ``list-panes`` format:
+        the PRIMARY pane's start command carries a multi-line ``--append-system-prompt`` that would
+        corrupt the line-delimited format, whereas a targeted read is single-value and safe. A pane
+        with no ``--agent-name`` (the primary, or a manual shell split) returns ``""``."""
+        result = await self._run_tmux(
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{pane_start_command}",
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return self._parse_agent_name(result.stdout)
+
+    @staticmethod
+    def _parse_agent_name(start_command: str) -> str:
+        """Extract the value of ``--agent-name <name>`` from a pane start command, else ``""``."""
+        match = re.search(r"--agent-name[=\s]+(\S+)", start_command or "")
+        return match.group(1).strip("\"'") if match else ""
 
     async def _evict_pane(
         self, pane_id: str, *, window_name: str | None = None, emit_events: bool
@@ -1943,6 +2015,21 @@ class TmuxInteractiveTransport(CLITransport):
                     "window_name": window_name if window_name is not None else pane.window_name,
                 }
             )
+            # Belt-and-suspenders teammate eviction: a teammate pane (identified by --agent-name)
+            # that dies or vanishes emits an explicit `stopped` agent_update so a LIVE client drops
+            # it immediately. terminal_pane_closed alone only makes the broker pop the registry row
+            # SILENTLY, so a connected client would keep showing the corpse until its next reconnect
+            # / REST poll. Pairs with the TeammateIdle finish signal: whichever fires first evicts.
+            if pane.agent_name:
+                await self._emit_agent_update(
+                    {
+                        "id": pane_id,
+                        "kind": "teammate",
+                        "name": pane.agent_name,
+                        "status": "done",
+                    },
+                    action="stopped",
+                )
 
     async def _start_pipe_for_pane(self, pane: _PaneState) -> None:
         pane.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2427,6 +2514,7 @@ class TmuxInteractiveTransport(CLITransport):
                 "pane_index": pane.pane_index,
                 "window_name": pane.window_name,
                 "pane_title": pane.pane_title,
+                "agent_name": pane.agent_name,
                 "active": pane.active,
                 "current_command": pane.current_command,
                 "log_path": str(pane.log_path),

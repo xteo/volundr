@@ -280,6 +280,65 @@ async def test_teammate_pane_name_never_uses_window_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_track_pane_agent_prefers_agent_name() -> None:
+    """The pane's `--agent-name` (agent-teams identity, forwarded on terminal_pane_opened) names the
+    teammate row — beating the pane_title/command fallback. This is the same string the TeammateIdle
+    finish signal uses, so the row can later be evicted by name."""
+    from skuld.broker import Broker
+
+    broker = Broker()
+    broker._track_pane_agent(  # noqa: SLF001
+        {
+            "type": "terminal_pane_opened",
+            "pane_id": "%1",
+            "pane_index": "1",
+            "window_name": "main",
+            "pane_title": "✳ Explore",  # a generic-ish title that must NOT win over agent_name
+            "current_command": "2.1.200",
+            "agent_name": "wa-audio-explorer",
+        },
+        opened=True,
+    )
+    assert broker._running_agents["%1"]["name"] == "wa-audio-explorer"  # noqa: SLF001
+    # No agent_name → the existing title/command/index fallback still applies.
+    broker._track_pane_agent(  # noqa: SLF001
+        {"pane_id": "%2", "pane_index": "2", "window_name": "main", "current_command": "vim"},
+        opened=True,
+    )
+    assert broker._running_agents["%2"]["name"] == "vim"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_teammate_idle_stopped_frame_evicts_pane_row() -> None:
+    """The transport's TeammateIdle handler emits a `stopped` agent_update keyed by the teammate's
+    pane_id; the broker's `_track_agent_update` must pop that row from the registry."""
+    from skuld.broker import Broker
+
+    broker = Broker()
+    # A teammate is tracked from its pane_opened…
+    broker._track_pane_agent(  # noqa: SLF001
+        {
+            "pane_id": "%1",
+            "pane_index": "1",
+            "window_name": "main",
+            "agent_name": "wa-explorer",
+        },
+        opened=True,
+    )
+    assert broker._running_agents["%1"]["name"] == "wa-explorer"  # noqa: SLF001
+
+    # …then it goes idle: the transport resolves teammate_name → pane_id and emits stopped(%1).
+    broker._track_agent_update(  # noqa: SLF001
+        {
+            "type": "agent_update",
+            "action": "stopped",
+            "agent": {"id": "%1", "kind": "teammate", "name": "wa-explorer", "status": "done"},
+        }
+    )
+    assert "%1" not in broker._running_agents  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_primary_pane_keyed_by_id_survives_reindexing() -> None:
     """The primary REPL is keyed by the pane_id of the first index-0 pane; a later event that puts
     the SAME pane at a different index still excludes it, and a teammate that lands at index 0 is
