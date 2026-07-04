@@ -387,6 +387,64 @@ async def test_refresh_panes_emits_new_agent_team_pane(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pane_opened_forwards_pane_title(tmp_path: Path) -> None:
+    # #{pane_title} rides along on terminal_pane_opened so the broker can name a teammate pane by a
+    # real identity instead of the shared "main" window name. (11-field list-panes format.)
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    transport.pane_lines.append("%2\t1\tmain\t0\tclaude\t100\t40\t0\t0\t0\treviewer")
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001 - direct pane simulation
+    await transport.stop()
+
+    opened = [e for e in events if e["type"] == "terminal_pane_opened" and e["pane_id"] == "%2"]
+    assert opened and opened[0]["pane_title"] == "reviewer"
+
+
+@pytest.mark.asyncio
+async def test_refresh_panes_evicts_dead_pane(tmp_path: Path) -> None:
+    # `remain-on-exit on` keeps an EXITED pane listed as a DEAD pane forever, so the vanish sweep
+    # never fires. A dead pane must be treated as CLOSED: one terminal_pane_closed, then untracked.
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    # A live teammate pane opens...
+    transport.pane_lines.append("%2\t1\tmain\t0\tclaude\t100\t40\t0\t0\t0\t")
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    assert "%2" in transport._panes  # noqa: SLF001
+    assert any(e["type"] == "terminal_pane_opened" and e["pane_id"] == "%2" for e in events)
+
+    # ...then it exits and becomes a DEAD-but-listed pane (pane_dead=1).
+    transport.pane_lines[-1] = "%2\t1\tmain\t0\tclaude\t100\t40\t0\t0\t1\t"
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    # A second poll while it is still a dead corpse must NOT re-emit (idempotent).
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    await transport.stop()
+
+    closed = [e for e in events if e["type"] == "terminal_pane_closed" and e["pane_id"] == "%2"]
+    assert len(closed) == 1, "a dead pane closes exactly once"
+    assert "%2" not in transport._panes  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_refresh_panes_ignores_pane_already_dead_on_first_sight(tmp_path: Path) -> None:
+    # A pane that is already dead the first time we see it was never opened — it must never register
+    # and must not emit an opened OR a closed event.
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    events = await _collect_events(transport)
+    await transport.start()
+
+    transport.pane_lines.append("%3\t2\tmain\t0\tclaude\t100\t40\t0\t0\t1\t")
+    await transport._refresh_panes(emit_events=True)  # noqa: SLF001
+    await transport.stop()
+
+    assert "%3" not in transport._panes  # noqa: SLF001
+    assert not any(e.get("pane_id") == "%3" for e in events if "pane" in e.get("type", ""))
+
+
+@pytest.mark.asyncio
 async def test_interrupt_finishes_active_turn(tmp_path: Path) -> None:
     transport = FakeTmuxInteractiveTransport(str(tmp_path))
     events = await _collect_events(transport)

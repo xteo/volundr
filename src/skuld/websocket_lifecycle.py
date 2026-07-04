@@ -273,6 +273,7 @@ class WebSocketLifecycleMixin:
             if self._current_plan is not None:
                 if not await self._safe_browser_send_json(websocket, self._current_plan):
                     return
+            self._reap_dead_teammates()
             if self._running_agents:
                 logger.info(
                     "Replaying %d running agent(s) to new browser",

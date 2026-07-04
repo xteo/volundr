@@ -207,23 +207,140 @@ async def test_track_pane_agent_excludes_primary_and_tracks_teammates() -> None:
     )
     assert broker._running_agents == {}  # noqa: SLF001 - primary pane excluded
 
+    # A teammate is a split of the single "main" window running claude — window_name is a useless
+    # identity (every teammate shares it), so the row uses the indexed fallback, never "main".
+    # (See test_teammate_pane_name_never_uses_window_name for the full title/command/index chain.)
     broker._track_pane_agent(  # noqa: SLF001
         {
             "type": "terminal_pane_opened",
             "pane_id": "%1",
             "pane_index": "1",
-            "window_name": "reviewer",
+            "window_name": "main",
             "current_command": "claude",
         },
         opened=True,
     )
     assert broker._running_agents["%1"]["kind"] == "teammate"  # noqa: SLF001
-    assert broker._running_agents["%1"]["name"] == "reviewer"  # noqa: SLF001
+    assert broker._running_agents["%1"]["name"] == "Teammate 1"  # noqa: SLF001
 
     broker._track_pane_agent(  # noqa: SLF001
         {"type": "terminal_pane_closed", "pane_id": "%1", "pane_index": "1"}, opened=False
     )
     assert "%1" not in broker._running_agents  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_teammate_pane_name_never_uses_window_name() -> None:
+    """Every teammate is a split of the single "main" window, so the name must come from a real
+    signal, never window_name. Fallback chain: pane_title → concrete current_command → Teammate <n>.
+    """
+    from skuld.broker import Broker
+
+    broker = Broker()
+
+    # 1) A meaningful pane_title wins outright — and is NOT the window name.
+    broker._track_pane_agent(  # noqa: SLF001
+        {
+            "pane_id": "%1",
+            "pane_index": "1",
+            "window_name": "main",
+            "pane_title": "reviewer",
+            "current_command": "node",
+        },
+        opened=True,
+    )
+    assert broker._running_agents["%1"]["name"] == "reviewer"  # noqa: SLF001
+
+    # 2) No useful title, but a concrete command → the command names the row.
+    broker._track_pane_agent(  # noqa: SLF001
+        {
+            "pane_id": "%2",
+            "pane_index": "2",
+            "window_name": "main",
+            "pane_title": "main",
+            "current_command": "vim",
+        },
+        opened=True,
+    )
+    assert broker._running_agents["%2"]["name"] == "vim"  # noqa: SLF001
+
+    # 3) Generic title + generic runtime command → indexed fallback, NEVER "main".
+    broker._track_pane_agent(  # noqa: SLF001
+        {
+            "pane_id": "%3",
+            "pane_index": "3",
+            "window_name": "main",
+            "pane_title": "main",
+            "current_command": "claude",
+        },
+        opened=True,
+    )
+    assert broker._running_agents["%3"]["name"] == "Teammate 3"  # noqa: SLF001
+    assert all(a["name"] != "main" for a in broker._running_agents.values())  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_primary_pane_keyed_by_id_survives_reindexing() -> None:
+    """The primary REPL is keyed by the pane_id of the first index-0 pane; a later event that puts
+    the SAME pane at a different index still excludes it, and a teammate that lands at index 0 is
+    still tracked."""
+    from skuld.broker import Broker
+
+    broker = Broker()
+    # Primary opens at index 0 → captured by id "%0".
+    broker._track_pane_agent(  # noqa: SLF001
+        {"pane_id": "%0", "pane_index": "0"}, opened=True
+    )
+    assert broker._running_agents == {}  # noqa: SLF001
+
+    # tmux renumbers: the primary "%0" is now reported at index 1 — still excluded (matched by id).
+    broker._track_pane_agent(  # noqa: SLF001
+        {"pane_id": "%0", "pane_index": "1", "current_command": "claude"}, opened=True
+    )
+    assert broker._running_agents == {}  # noqa: SLF001
+
+    # A teammate now reported at index 0 must still be tracked (id ≠ the captured primary id).
+    broker._track_pane_agent(  # noqa: SLF001
+        {"pane_id": "%5", "pane_index": "0", "current_command": "vim"}, opened=True
+    )
+    assert broker._running_agents["%5"]["kind"] == "teammate"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reap_dead_teammates_drops_pane_that_no_longer_exists() -> None:
+    """Belt-and-suspenders: a teammate row whose pane is gone from the transport's live set is
+    reaped at serve time; subagent rows (not keyed by a live pane) are never touched."""
+    from skuld.broker import Broker
+
+    broker = Broker()
+    broker._running_agents = {  # noqa: SLF001
+        "%1": {"id": "%1", "kind": "teammate", "name": "Teammate 1", "status": "running"},
+        "%2": {"id": "%2", "kind": "teammate", "name": "Teammate 2", "status": "running"},
+        "sub-a": {"id": "sub-a", "kind": "subagent", "name": "Mercury", "status": "running"},
+    }
+
+    class _FakeTransport:
+        live_pane_ids = {"%1"}  # %2 has vanished; subagents are not panes
+
+    broker._transport = _FakeTransport()  # noqa: SLF001
+    broker._reap_dead_teammates()  # noqa: SLF001
+
+    assert set(broker._running_agents) == {"%1", "sub-a"}  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reap_dead_teammates_noop_without_live_pane_transport() -> None:
+    """A transport that cannot report live panes (e.g. a non-tmux one) must leave the registry
+    untouched — reaping is a tmux-only safety net, not a correctness dependency."""
+    from skuld.broker import Broker
+
+    broker = Broker()
+    broker._running_agents = {  # noqa: SLF001
+        "%1": {"id": "%1", "kind": "teammate", "name": "Teammate 1", "status": "running"},
+    }
+    broker._transport = object()  # no live_pane_ids attribute  # noqa: SLF001
+    broker._reap_dead_teammates()  # noqa: SLF001
+    assert set(broker._running_agents) == {"%1"}  # noqa: SLF001
 
 
 @pytest.mark.asyncio

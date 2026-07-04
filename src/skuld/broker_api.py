@@ -401,6 +401,7 @@ async def get_plan() -> dict:
 @app.get("/api/agents")
 async def get_agents() -> dict:
     """Agents/sub-processes running in this session: Task subagents + teammate panes."""
+    broker._reap_dead_teammates()
     return {"agents": list(broker._running_agents.values())}
 
 
