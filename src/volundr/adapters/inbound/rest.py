@@ -3102,13 +3102,24 @@ def create_router(
         session_id: UUID,
         tool_use_id: str,
     ) -> tuple[dict | None, list | None]:
-        """Resolve one FULL tool_result block: live-pod proxy → durable-scan fallback.
+        """Resolve one FULL tool_result block through three sources, in order:
 
-        Returns ``(result, durable_turns)`` where ``result`` is the
-        ``{tool_use_id, content, is_error}`` dict (or None when absent) and
-        ``durable_turns`` is the rebuilt durable transcript's turn list WHEN the
-        durable fallback ran (None when the live pod answered) — the preview
-        endpoint reuses that one expensive rebuild to warm every image in it.
+        1. the live pod's per-id lazy-load endpoint (``api/conversation/tool-result/{id}``):
+           new brokers only; a 200 short-circuits and returns ``(result, None)``;
+        2. the live pod's FULL conversation-history (``api/conversation/history?detail=full``):
+           the recovery path for an OLD broker that predates the per-id endpoint. An old
+           broker ignores ``detail`` and serves every tool_result inline, so its history
+           carries the large image results a durable rebuild can MISS. This is load-bearing:
+           on the lexi-frontend-presentation session the per-id endpoint 404s and the durable
+           rebuild misses 69/70 image ids, yet all are present full-base64 in the history;
+        3. the durable-log rebuild (``forge.get_transcript``) -> workspace fallback: for
+           stopped/seed-only sessions with no reachable pod.
+
+        Returns ``(result, warm_turns)`` where ``result`` is the
+        ``{tool_use_id, content, is_error}`` dict (or None when absent) and ``warm_turns`` is
+        the turn list the caller's preview warm-pass should reuse: the live-history turns
+        (source 2) or the rebuilt durable turns (source 3), whichever it fell through to. It
+        is None ONLY when the per-id endpoint (source 1) answered directly (nothing to warm).
         """
 
         def _scan(turns: list) -> dict | None:
@@ -3127,6 +3138,11 @@ def create_router(
                         }
             return None
 
+        # Live-history turns recovered from an old broker (source 2). Handed back as the warm-pass
+        # source even when the specific id was not found there, since they are still a richer source
+        # than the durable rebuild (which may be a rebuild-miss for big images).
+        live_turns: list | None = None
+
         if session.chat_endpoint:
             try:
                 _, base_url = await forge.get_session_proxy_target(session_id)
@@ -3134,15 +3150,19 @@ def create_router(
                 auth = request.headers.get("authorization")
                 if auth:
                     headers["Authorization"] = auth
-                proxy_url, routing_headers = _http_proxy_target(
+                tool_result_url, routing_headers = _http_proxy_target(
                     _session_proxy_url(
                         base_url, "api", "conversation", "tool-result", tool_use_id
                     )
                 )
                 headers.update(routing_headers)
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                # Generous timeout: source 2 pulls the WHOLE inline transcript from an old
+                # broker (tens of MB for an image-heavy session), which the tight 10s
+                # conversation timeout can clip. Paid once per session (single-flight + warm).
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    # (1) Fast path: the per-id lazy-load endpoint (new brokers only).
                     response = await client.get(
-                        proxy_url,
+                        tool_result_url,
                         headers=headers,
                     )
                     if response.status_code != status.HTTP_404_NOT_FOUND:
@@ -3150,9 +3170,27 @@ def create_router(
                         payload = response.json()
                         if isinstance(payload, dict):
                             return payload, None
-                    # 404 from the live pod → fall through to the durable scan
-                    # (the pod may have rebooted with a seed-only transcript, or —
-                    # the old-broker case — never had the tool-result endpoint).
+                    # (2) 404: an OLD broker that never had the per-id endpoint. Its FULL
+                    # conversation-history still carries every tool_result inline (it ignores
+                    # `detail`), and it is the ONLY live source for the large image results a
+                    # durable rebuild misses. Scan it, and hand the turns back so the caller's
+                    # warm-pass fills the whole session from this one fetch.
+                    history_url, history_routing_headers = _http_proxy_target(
+                        _session_proxy_url(base_url, "api", "conversation", "history")
+                    )
+                    history_headers = {**headers, **history_routing_headers}
+                    history = await client.get(
+                        history_url, headers=history_headers, params={"detail": "full"}
+                    )
+                    if history.status_code != status.HTTP_404_NOT_FOUND:
+                        history.raise_for_status()
+                        body = history.json()
+                        turns = body.get("turns") if isinstance(body, dict) else None
+                        if isinstance(turns, list):
+                            live_turns = turns
+                            found = _scan(turns)
+                            if found is not None:
+                                return found, turns
             except (ValueError, httpx.HTTPStatusError, httpx.RequestError) as e:
                 logger.info(
                     "Live tool-result fetch failed for session %s; trying durable log: %s",
@@ -3160,12 +3198,20 @@ def create_router(
                     _sanitize_log(e),
                 )
 
+        # (3) Durable-log rebuild → workspace fallback (stopped/seed-only sessions).
         try:
             transcript = await forge.get_transcript(session_id)
         except (RuntimeError, ValueError):
             transcript = _fallback_workspace_transcript(session) or {"turns": []}
         turns = transcript.get("turns", []) if isinstance(transcript, dict) else []
-        return _scan(turns), turns
+        found = _scan(turns)
+        if found is not None:
+            return found, turns
+        # Not in the durable log either. Prefer the live-history turns for the warm-pass when we
+        # have them (they carry the big inline images the durable rebuild dropped).
+        if live_turns is not None:
+            return None, live_turns
+        return None, turns
 
     @router.get(
         "/sessions/{session_id}/tool-result/{tool_use_id}",
