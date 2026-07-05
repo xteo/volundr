@@ -1088,6 +1088,45 @@ def create_volundr_router(
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
+    @router.get("/sessions/{session_id}/tool-result/{tool_use_id}/preview")
+    async def get_tool_result_preview(
+        request: Request,
+        session_id: str = Path(description="Volundr session identifier"),
+        tool_use_id: str = Path(description="tool_use_id of the image result"),
+        principal: Principal = Depends(extract_principal),
+    ) -> Response:
+        """Byte-proxy a scaled-down JPEG tool-result preview from the owning instance.
+
+        Unlike the sibling JSON routes this forwards raw image bytes; 404/501 from
+        the owner pass through via ``_ensure_remote_success`` so the client can
+        fall back to the full tool-result fetch.
+        """
+        instance, _ = await _find_session_owner(
+            service,
+            principal,
+            request,
+            session_id,
+            embedded_app=embedded_forge_app,
+        )
+        response = await _request_remote(
+            instance,
+            request,
+            method="GET",
+            path=(f"/sessions/{session_id}/tool-result/{quote(tool_use_id, safe='')}/preview"),
+            embedded_app=embedded_forge_app,
+        )
+        _ensure_remote_success(response)
+        headers = {
+            name: value
+            for name in ("cache-control", "etag")
+            if (value := response.headers.get(name))
+        }
+        return Response(
+            content=response.content,
+            media_type=response.headers.get("content-type", "image/jpeg"),
+            headers=headers,
+        )
+
     @router.get("/sessions/{session_id}/workflow/gates")
     async def get_workflow_gates(
         request: Request,

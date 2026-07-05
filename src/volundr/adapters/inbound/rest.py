@@ -19,6 +19,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turns
+from skuld.tool_result_preview import (
+    PreviewCache,
+    PreviewUnavailableError,
+    extract_image_bytes,
+    generate_preview_jpeg,
+    warm_previews_from_turns,
+)
 from volundr.adapters.inbound.auth import extract_principal, require_role
 from volundr.config import PermissionAutoApprovalConfig
 from volundr.domain.models import (
@@ -84,6 +91,15 @@ WORKFLOW_GATE_INTENT_HEADER = "x-niuu-workflow-gate-intent"
 # number; the broker — not this grace — owns the delivery durability guarantee, so
 # a short grace is correct: a no-ACK is reported as pending/accepted, never "sent".
 SEND_MESSAGE_ACK_GRACE_SECONDS = 3.0
+
+# Disk root for generated tool-result image previews. ~/.niuu is the platform's
+# durable local-state home (workspaces, forge-state.json), so previews survive
+# restarts by construction. Tests inject their own PreviewCache via create_router.
+_PREVIEW_CACHE_ROOT = FilePath("~/.niuu/preview-cache").expanduser()
+
+# A tool_use_id's result is immutable — a regenerated preview is byte-equivalent —
+# so previews are safely long-lived cacheable at every layer (incl. URLSession).
+_PREVIEW_RESPONSE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 
 def _public_session_endpoint(endpoint: str | None) -> str | None:
@@ -1279,9 +1295,12 @@ def create_router(
     external_session_service: ExternalSessionService | None = None,
     device_repository: DeviceTokenRepository | None = None,
     prefix: str = "/api/v1/forge",
+    preview_cache: PreviewCache | None = None,
 ) -> APIRouter:
     """Create FastAPI router with session, stats, token, repo, and SSE endpoints."""
     router = APIRouter(prefix=prefix)
+    if preview_cache is None:
+        preview_cache = PreviewCache(_PREVIEW_CACHE_ROOT)
 
     @router.get("/version", tags=["Forge"])
     async def forge_version() -> dict:
@@ -2861,6 +2880,73 @@ def create_router(
                 detail=str(e),
             )
 
+    async def _fetch_full_tool_result(
+        request: Request,
+        session: Session,
+        session_id: UUID,
+        tool_use_id: str,
+    ) -> tuple[dict | None, list | None]:
+        """Resolve one FULL tool_result block: live-pod proxy → durable-scan fallback.
+
+        Returns ``(result, durable_turns)`` where ``result`` is the
+        ``{tool_use_id, content, is_error}`` dict (or None when absent) and
+        ``durable_turns`` is the rebuilt durable transcript's turn list WHEN the
+        durable fallback ran (None when the live pod answered) — the preview
+        endpoint reuses that one expensive rebuild to warm every image in it.
+        """
+
+        def _scan(turns: list) -> dict | None:
+            for turn in turns:
+                parts = turn.get("parts") if isinstance(turn, dict) else None
+                for block in parts or []:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") == tool_use_id
+                    ):
+                        return {
+                            "tool_use_id": tool_use_id,
+                            "content": block.get("content", ""),
+                            "is_error": bool(block.get("is_error", False)),
+                        }
+            return None
+
+        if session.chat_endpoint:
+            try:
+                _, base_url = await forge.get_session_proxy_target(session_id)
+                headers = {}
+                auth = request.headers.get("authorization")
+                if auth:
+                    headers["Authorization"] = auth
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        _session_proxy_url(
+                            base_url, "api", "conversation", "tool-result", tool_use_id
+                        ),
+                        headers=headers,
+                    )
+                    if response.status_code != status.HTTP_404_NOT_FOUND:
+                        response.raise_for_status()
+                        payload = response.json()
+                        if isinstance(payload, dict):
+                            return payload, None
+                    # 404 from the live pod → fall through to the durable scan
+                    # (the pod may have rebooted with a seed-only transcript, or —
+                    # the old-broker case — never had the tool-result endpoint).
+            except (ValueError, httpx.HTTPStatusError, httpx.RequestError) as e:
+                logger.info(
+                    "Live tool-result fetch failed for session %s; trying durable log: %s",
+                    _sanitize_log(session_id),
+                    _sanitize_log(e),
+                )
+
+        try:
+            transcript = await forge.get_transcript(session_id)
+        except (RuntimeError, ValueError):
+            transcript = _fallback_workspace_transcript(session) or {"turns": []}
+        turns = transcript.get("turns", []) if isinstance(transcript, dict) else []
+        return _scan(turns), turns
+
     @router.get(
         "/sessions/{session_id}/tool-result/{tool_use_id}",
         tags=["Sessions"],
@@ -2881,22 +2967,62 @@ def create_router(
         session pod; falls back to scanning the durable transcript for
         stopped/seed-only sessions. 404 when the result is absent.
         """
+        session = await forge.get_session(session_id)
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session not found: {session_id}",
+            )
+        found, _ = await _fetch_full_tool_result(request, session, session_id, tool_use_id)
+        if found is not None:
+            return found
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"tool_result not found: {tool_use_id}",
+        )
 
-        def _scan(turns: list) -> dict | None:
-            for turn in turns:
-                parts = turn.get("parts") if isinstance(turn, dict) else None
-                for block in parts or []:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "tool_result"
-                        and block.get("tool_use_id") == tool_use_id
-                    ):
-                        return {
-                            "tool_use_id": tool_use_id,
-                            "content": block.get("content", ""),
-                            "is_error": bool(block.get("is_error", False)),
-                        }
-            return None
+    @router.get(
+        "/sessions/{session_id}/tool-result/{tool_use_id}/preview",
+        tags=["Sessions"],
+        responses={
+            404: {"model": ErrorResponse},
+            501: {"model": ErrorResponse},
+            502: {"model": ErrorResponse},
+        },
+    )
+    async def get_tool_result_preview(
+        request: Request,
+        session_id: UUID = Path(description="Unique session identifier"),
+        tool_use_id: str = Path(description="tool_use_id of the image result"),
+    ) -> Response:
+        """Return a scaled-down JPEG preview of an image tool_result.
+
+        Generated on FIRST request (full envelope resolved via the same
+        live-pod → durable-fallback chain as ``get_tool_result``, then
+        Pillow-downscaled to a ~400px longest edge) and cached on disk keyed by
+        tool_use_id — later connects serve it in milliseconds. When the miss was
+        served by a durable-transcript rebuild, that one rebuild warms previews
+        for EVERY image tool_result in the session. 404 when the result is
+        absent or not an image (the client falls back to the full fetch);
+        501 when Pillow is unavailable.
+        """
+        sid = str(session_id)
+
+        def _jpeg_response(data: bytes) -> Response:
+            return Response(
+                content=data,
+                media_type="image/jpeg",
+                headers=dict(_PREVIEW_RESPONSE_HEADERS),
+            )
+
+        cached = preview_cache.get(sid, tool_use_id)
+        if cached is not None:
+            return _jpeg_response(cached)
+        if preview_cache.is_non_image(sid, tool_use_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"tool_result is not an image: {tool_use_id}",
+            )
 
         session = await forge.get_session(session_id)
         if session is None:
@@ -2905,43 +3031,80 @@ def create_router(
                 detail=f"Session not found: {session_id}",
             )
 
-        if session.chat_endpoint:
-            try:
-                _, base_url = await forge.get_session_proxy_target(session_id)
-                headers = {}
-                auth = request.headers.get("authorization")
-                if auth:
-                    headers["Authorization"] = auth
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get(
-                        _session_proxy_url(
-                            base_url, "api", "conversation", "tool-result", tool_use_id
-                        ),
-                        headers=headers,
-                    )
-                    if response.status_code != status.HTTP_404_NOT_FOUND:
-                        response.raise_for_status()
-                        return response.json()
-                    # 404 from the live pod → fall through to the durable scan
-                    # (the pod may have rebooted with a seed-only transcript).
-            except (ValueError, httpx.HTTPStatusError, httpx.RequestError) as e:
-                logger.info(
-                    "Live tool-result fetch failed for session %s; trying durable log: %s",
-                    _sanitize_log(session_id),
-                    _sanitize_log(e),
-                )
+        # Single-flight per session: the client fires 3-4 preview requests in
+        # parallel, and each old-broker cache miss costs a multi-second durable
+        # rebuild — the first holder pays it once (and warms the whole session);
+        # the waiters wake into cache hits.
+        async with preview_cache.session_lock(sid):
+            cached = preview_cache.get(sid, tool_use_id)
+            if cached is not None:
+                return _jpeg_response(cached)
 
-        try:
-            transcript = await forge.get_transcript(session_id)
-        except (RuntimeError, ValueError):
-            transcript = _fallback_workspace_transcript(session) or {"turns": []}
-        found = _scan(transcript.get("turns", []) if isinstance(transcript, dict) else [])
-        if found is not None:
-            return found
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"tool_result not found: {tool_use_id}",
-        )
+            found, durable_turns = await _fetch_full_tool_result(
+                request, session, session_id, tool_use_id
+            )
+            try:
+                if durable_turns is not None:
+                    # WARM PASS: reuse the single expensive durable rebuild for
+                    # every image in the session (Pillow work off the event loop).
+                    warmed = await asyncio.to_thread(
+                        warm_previews_from_turns, preview_cache, sid, durable_turns
+                    )
+                    if warmed:
+                        logger.info(
+                            "Warmed %d tool-result preview(s) for session %s",
+                            warmed,
+                            _sanitize_log(session_id),
+                        )
+                    cached = preview_cache.get(sid, tool_use_id)
+                    if cached is not None:
+                        return _jpeg_response(cached)
+
+                if found is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"tool_result not found: {tool_use_id}",
+                    )
+
+                try:
+                    extracted = extract_image_bytes(found.get("content"))
+                except ValueError:
+                    logger.warning(
+                        "Corrupt image base64 in tool_result %s (session %s)",
+                        _sanitize_log(tool_use_id),
+                        _sanitize_log(session_id),
+                    )
+                    extracted = None
+                if extracted is None:
+                    preview_cache.mark_non_image(sid, tool_use_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"tool_result is not an image: {tool_use_id}",
+                    )
+                try:
+                    jpeg = await asyncio.to_thread(
+                        generate_preview_jpeg,
+                        extracted[0],
+                        max_edge=preview_cache.max_edge,
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Undecodable image tool_result %s (session %s)",
+                        _sanitize_log(tool_use_id),
+                        _sanitize_log(session_id),
+                    )
+                    preview_cache.mark_non_image(sid, tool_use_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"tool_result image is undecodable: {tool_use_id}",
+                    ) from None
+            except PreviewUnavailableError:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail="Preview generation unavailable: Pillow is not installed",
+                ) from None
+            preview_cache.put(sid, tool_use_id, jpeg)
+            return _jpeg_response(jpeg)
 
     @router.get(
         "/sessions/{session_id}/workflow/gates",
