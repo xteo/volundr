@@ -327,6 +327,11 @@ async def get_conversation_history(detail: str = "full") -> dict:
         # next SSE/activity report to know whether the session is active/idle/etc.
         "activity_state": broker._activity_state,
         "activity_state_since": broker._state_since_iso(broker._activity_state_since),
+        "turn_started_at": (
+            broker._state_since_iso(broker._turn_started_at)
+            if broker._turn_started_at is not None
+            else None
+        ),
     }
 
 

@@ -1639,4 +1639,10 @@ data:
   000061_observatory_fragments.down.sql: |
     DROP INDEX IF EXISTS observatory_fragments_received_at_idx;
     DROP TABLE IF EXISTS observatory_fragments;
+  000062_session_turn_started_at.up.sql: |
+    -- Stable anchor for the current agent turn. Unlike the coarse activity
+    -- state timestamp, this survives active/tool and awaiting-input transitions.
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMPTZ;
+  000062_session_turn_started_at.down.sql: |
+    ALTER TABLE sessions DROP COLUMN IF EXISTS turn_started_at;
 {{- end }}

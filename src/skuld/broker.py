@@ -478,6 +478,9 @@ class Broker(
         # keeps elapsed accurate. Travels to Volundr as ISO8601 ("state_since") so
         # clients can render a live "active for 12s" without re-deriving it.
         self._activity_state_since: float = time.time()
+        # Stable anchor for the current turn. It survives temporary attention
+        # states and clears only when the turn becomes idle or stops.
+        self._turn_started_at: float | None = None
         self._last_activity_report: float = 0.0
         # Rich context for the CURRENT activity state (e.g. the pending question's
         # kind/request_id/prompt for awaiting_input). Re-sent verbatim by the

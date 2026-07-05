@@ -698,6 +698,15 @@ class ActivityReport(BaseModel):
             "Optional for backward-compat with older brokers that omit it."
         ),
     )
+    turn_started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "ISO8601 UTC timestamp of when the CURRENT turn started (the user's "
+            "prompt landing). Stable across intra-turn state flips; null when no "
+            "turn is in flight. Optional (older brokers omit it → null persisted, "
+            "clients fall back to state_since)."
+        ),
+    )
     metadata: dict = Field(default_factory=dict, description="Activity metadata")
 
     @field_validator("metadata", mode="before")
@@ -833,6 +842,15 @@ class SessionResponse(BaseModel):
             "accurate elapsed time for the current state."
         ),
     )
+    turn_started_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO 8601 UTC timestamp of when the CURRENT turn started (the user's "
+            "prompt landing). Stable across intra-turn active/tool_executing "
+            "flips; null when no turn is in flight. Clients anchor the RUNNING "
+            "elapsed to this (falling back to activity_state_since when null)."
+        ),
+    )
     activity_metadata: dict = Field(
         default_factory=dict,
         description="Metadata from the latest activity report",
@@ -954,6 +972,9 @@ class SessionResponse(BaseModel):
             activity_state=(session.activity_state.value if session.activity_state else None),
             activity_state_since=(
                 session.activity_state_since.isoformat() if session.activity_state_since else None
+            ),
+            turn_started_at=(
+                session.turn_started_at.isoformat() if session.turn_started_at else None
             ),
             activity_metadata=session.activity_metadata,
             needs_attention=session.needs_attention,
@@ -2069,7 +2090,11 @@ def create_router(
         )
         try:
             updated = await forge.update_activity(
-                session_id, activity_state, data.metadata, state_since=data.state_since
+                session_id,
+                activity_state,
+                data.metadata,
+                state_since=data.state_since,
+                turn_started_at=data.turn_started_at,
             )
             logger.info(
                 "Activity updated: session=%s state=%s broadcaster=%s",

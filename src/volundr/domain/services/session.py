@@ -352,6 +352,7 @@ class SessionService:
         state: SessionActivityState,
         metadata: dict,
         state_since: datetime | None = None,
+        turn_started_at: datetime | None = None,
     ) -> Session:
         """Update a session's activity state and broadcast an SSE event.
 
@@ -359,6 +360,13 @@ class SessionService:
         entered ``state`` (None for older brokers that don't report it). It is
         persisted and re-broadcast so clients can render an accurate elapsed
         time without re-deriving it from event arrival.
+
+        ``turn_started_at`` is the broker-stamped UTC timestamp of when the
+        CURRENT turn started (the prompt instant), stable across intra-turn
+        state flips; None when no turn is in flight OR the broker is too old to
+        report it. Unlike ``state_since`` it is persisted VERBATIM (no now()
+        fallback) — a null is meaningful ("no turn / unknown"), and clients then
+        fall back to ``state_since`` for the running elapsed.
 
         Raises SessionNotFoundError if the session doesn't exist.
         """
@@ -383,6 +391,9 @@ class SessionService:
         # when an older broker omits it so the field is never null for a live
         # session that just transitioned.
         session.activity_state_since = state_since or datetime.now(UTC)
+        # Persisted VERBATIM (incl. None) — a null turn anchor is meaningful
+        # (no turn in flight / old broker), and clients fall back to state_since.
+        session.turn_started_at = turn_started_at
         session.activity_metadata = metadata
         if state is SessionActivityState.ERROR:
             message = str(metadata.get("error") or metadata.get("message") or "").strip()
@@ -412,6 +423,9 @@ class SessionService:
                             updated.activity_state_since.isoformat()
                             if updated.activity_state_since
                             else None
+                        ),
+                        "turn_started_at": (
+                            updated.turn_started_at.isoformat() if updated.turn_started_at else None
                         ),
                         "metadata": metadata,
                         "owner_id": session.owner_id or "",
