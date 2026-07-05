@@ -495,8 +495,17 @@ class Session(BaseModel):
         default=None,
         description=(
             "Timestamp (UTC) when the session ENTERED its current activity_state. "
-            "Stamped only on a real state change (not on re-asserting the same "
-            "state), so clients can render an accurate 'active for Ns' elapsed."
+            "Stamped only on a real (coarse-bucket) change, so clients can render "
+            "an accurate 'active for Ns' elapsed without an intra-turn reset."
+        ),
+    )
+    turn_started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Timestamp (UTC) when the CURRENT turn started (the user's prompt "
+            "landing). Stable across intra-turn active/tool_executing flips; "
+            "None when no turn is in flight. Clients anchor RUNNING elapsed to "
+            "this, falling back to activity_state_since for older brokers."
         ),
     )
     activity_metadata: dict = Field(

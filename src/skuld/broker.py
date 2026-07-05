@@ -1097,6 +1097,13 @@ class Broker:
         # keeps elapsed accurate. Travels to Volundr as ISO8601 ("state_since") so
         # clients can render a live "active for 12s" without re-deriving it.
         self._activity_state_since: float = time.time()
+        # Wall-clock epoch seconds (UTC) of when the CURRENT turn STARTED (the
+        # user's prompt landing). Floor-stamped on entry to the running bucket,
+        # cleared on turn end (idle/stopped); SURVIVES awaiting_input. None ⇔ no
+        # turn in flight. Rides the wire as ISO8601 ("turn_started_at") so clients
+        # anchor the RUNNING elapsed to it and never reset across intra-turn raw
+        # active⇄tool_executing flips. See _set_activity_state.
+        self._turn_started_at: float | None = None
         self._last_activity_report: float = 0.0
         # Rich context for the CURRENT activity state (e.g. the pending question's
         # kind/request_id/prompt for awaiting_input). Re-sent verbatim by the
@@ -5506,20 +5513,60 @@ class Broker:
             model=self.model,
         )
 
-    def _set_activity_state(self, state: str, metadata: dict[str, Any] | None = None) -> None:
-        """Set the in-memory activity_state and stamp ``_activity_state_since``.
+    # The COARSE buckets clients render as one headline state. ``active`` and
+    # ``tool_executing`` BOTH collapse to "running" (iOS/web show one "running"
+    # label for the whole turn), so an intra-turn active⇄tool_executing flip must
+    # NOT re-stamp ``_activity_state_since`` — that is exactly the reset Damien
+    # sees ("runs for 15s… then 6, 7…"). Every other raw state is its own bucket.
+    _RUNNING_RAW_STATES = ("active", "tool_executing")
+    # Raw states that END a turn — they clear the turn anchor. ``awaiting_input``
+    # is deliberately NOT here: a turn that blocks on a human resumes, and the
+    # running counter after the answer must still read from the ORIGINAL prompt
+    # ("from the moment my prompt goes"), so the anchor survives the gate.
+    _TURN_END_RAW_STATES = ("idle", "stopped")
 
-        The canonical mutation point for ``self._activity_state``. The "since"
-        timestamp (wall-clock epoch seconds, UTC) is stamped ONLY when the state
-        actually CHANGES — re-asserting the same state (heartbeats, repeated
-        reports) must NOT reset it, so elapsed time stays accurate for clients.
+    @classmethod
+    def _coarse_bucket(cls, state: str) -> str:
+        """Collapse a raw activity_state onto its client-visible headline bucket.
+
+        ``{active, tool_executing} → "running"``; every other (incl. unknown/
+        future) state maps to itself so it always gets its own ``_since`` stamp.
+        """
+        return "running" if state in cls._RUNNING_RAW_STATES else state
+
+    def _set_activity_state(self, state: str, metadata: dict[str, Any] | None = None) -> None:
+        """Set the in-memory activity_state and manage the two time anchors.
+
+        The canonical mutation point for ``self._activity_state``. Two anchors:
+
+        - ``_activity_state_since`` — re-stamped ONLY when the COARSE bucket
+          changes (``_coarse_bucket``). The raw ``self._activity_state`` string
+          still flips on every call (so clients keep the tool sub-detail), but an
+          intra-turn ``active⇄tool_executing`` flip keeps ``_since`` — the fix for
+          the running counter resetting inside one turn. Re-asserting the same
+          state (heartbeats) is a no-op for both anchors.
+        - ``_turn_started_at`` — floor-stamped when we ENTER the running bucket
+          from any non-running state (the "my prompt goes" instant for every
+          transport, precise hook or not) and CLEARED when a turn ends (idle/
+          stopped). It survives ``awaiting_input`` so a resumed turn still shows
+          total turn age. Rides the wire so clients anchor RUNNING elapsed to it.
 
         ``metadata`` is accepted for symmetry/forward-compat; it is not stored
         here (the rich per-state context lives in ``_activity_extra``, managed by
         ``_report_activity_state``).
         """
-        if state != self._activity_state:
-            self._activity_state = state
+        new_bucket = self._coarse_bucket(state)
+        old_bucket = self._coarse_bucket(self._activity_state)
+        # Turn anchor lifecycle (evaluated against the PRIOR state).
+        if new_bucket == "running" and self._turn_started_at is None:
+            # Entering the running bucket with no anchor → this is turn start.
+            self._turn_started_at = time.time()
+        elif state in self._TURN_END_RAW_STATES:
+            self._turn_started_at = None
+        # Raw state always flips (preserves tool sub-detail); _since holds within
+        # a coarse bucket.
+        self._activity_state = state
+        if new_bucket != old_bucket:
             self._activity_state_since = time.time()
 
     @staticmethod
@@ -5582,6 +5629,15 @@ class Broker:
                 json={
                     "state": state,
                     "state_since": self._state_since_iso(self._activity_state_since),
+                    # The stable TURN anchor (null when no turn is in flight). Lets
+                    # clients tick RUNNING elapsed from the prompt instant instead
+                    # of the coarse _since (which, while now stable within a turn,
+                    # still moves across a real state change like awaiting→active).
+                    "turn_started_at": (
+                        self._state_since_iso(self._turn_started_at)
+                        if self._turn_started_at is not None
+                        else None
+                    ),
                     "metadata": metadata,
                 },
             )
@@ -6711,6 +6767,14 @@ async def get_conversation_history(detail: str = "full") -> dict:
         # next SSE/activity report to know whether the session is active/idle/etc.
         "activity_state": broker._activity_state,
         "activity_state_since": broker._state_since_iso(broker._activity_state_since),
+        # The stable turn anchor for the running elapsed (null ⇔ no turn in
+        # flight). Mirrors the /activity report so a reconnect's first paint can
+        # anchor "running Ns" to the prompt instant, not the coarse _since.
+        "turn_started_at": (
+            broker._state_since_iso(broker._turn_started_at)
+            if broker._turn_started_at is not None
+            else None
+        ),
     }
 
 
