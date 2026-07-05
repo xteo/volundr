@@ -1238,3 +1238,57 @@ def test_event_log_replay_passes_list_through_verbatim() -> None:
 
     assert isinstance(payload, list)
     assert [entry["seq"] for entry in payload] == [1, 2]
+
+
+@respx.mock
+def test_tool_result_preview_byte_proxies_jpeg_from_owner() -> None:
+    """The aggregate preview route forwards RAW image bytes (not JSON) from the
+    owning instance, preserving content-type and the immutable cache-control the
+    volundr tier stamps — the phone's URLSession caches on it."""
+    client = _client([_instance("beta", base_url="http://beta")])
+    respx.get("http://beta/api/v1/forge/sessions/s2").mock(
+        return_value=Response(200, json={"id": "s2", "name": "Session 2"})
+    )
+    jpeg_bytes = b"\xff\xd8\xff\xe0fake-jpeg-payload\xff\xd9"
+    route = respx.get("http://beta/api/v1/forge/sessions/s2/tool-result/tu-img/preview").mock(
+        return_value=Response(
+            200,
+            content=jpeg_bytes,
+            headers={
+                "content-type": "image/jpeg",
+                "cache-control": "public, max-age=31536000, immutable",
+            },
+        )
+    )
+
+    response = client.get(
+        "/api/v1/forge/sessions/s2/tool-result/tu-img/preview",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.content == jpeg_bytes
+    assert response.headers["content-type"] == "image/jpeg"
+    assert "immutable" in response.headers["cache-control"]
+    assert route.called
+
+
+@respx.mock
+def test_tool_result_preview_passes_owner_404_through() -> None:
+    """A non-image tool_result 404s at the volundr tier; the aggregate must pass
+    that through (NOT wrap it in a 502) so the client falls back to the full
+    tool-result fetch."""
+    client = _client([_instance("beta", base_url="http://beta")])
+    respx.get("http://beta/api/v1/forge/sessions/s2").mock(
+        return_value=Response(200, json={"id": "s2", "name": "Session 2"})
+    )
+    respx.get("http://beta/api/v1/forge/sessions/s2/tool-result/tu-text/preview").mock(
+        return_value=Response(404, json={"detail": "tool_result is not an image"})
+    )
+
+    response = client.get(
+        "/api/v1/forge/sessions/s2/tool-result/tu-text/preview",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 404
