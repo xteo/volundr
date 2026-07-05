@@ -227,21 +227,40 @@ async def _running_session(repository: InMemorySessionRepository) -> Session:
     return running
 
 
-def _patch_tool_result_pod(*, status_code: int, body: dict | None):
-    """Mock ``rest.httpx.AsyncClient``: the live pod GET returns status/body."""
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = status_code
-    mock_response.json.return_value = body
+def _pod_response(status_code: int, body: dict | None):
+    """A single mocked ``httpx.Response`` with a status-driven ``raise_for_status``."""
+    resp = MagicMock(spec=httpx.Response)
+    resp.status_code = status_code
+    resp.json.return_value = body
 
     def _raise_for_status():
         if status_code >= 400:
-            raise httpx.HTTPStatusError("err", request=MagicMock(), response=mock_response)
+            raise httpx.HTTPStatusError("err", request=MagicMock(), response=resp)
 
-    mock_response.raise_for_status.side_effect = _raise_for_status
+    resp.raise_for_status.side_effect = _raise_for_status
+    return resp
 
+
+def _patch_tool_result_pod(*, status_code: int, body: dict | None):
+    """Mock ``rest.httpx.AsyncClient``: EVERY live-pod GET returns the same status/body
+    (per-id tool-result AND the old-broker conversation-history fallback both see it)."""
+    mock_response = _pod_response(status_code, body)
     mock_client = AsyncMock()
     mock_client.get.return_value = mock_response
     return mock_response, mock_client
+
+
+def _patch_pod_routes(*, tool_result: MagicMock, history: MagicMock):
+    """Mock ``rest.httpx.AsyncClient`` so the per-id tool-result endpoint and the
+    conversation-history endpoint return DIFFERENT responses (the old-broker recovery
+    path: per-id 404, but the full history carries the image inline)."""
+
+    def _route(url, *args, **kwargs):
+        return history if "history" in str(url) else tool_result
+
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = _route
+    return mock_client
 
 
 # --- (1) happy path: 200 image/jpeg, scaled, immutable-cacheable -------------------
@@ -439,9 +458,73 @@ async def test_preview_old_broker_pod_404_served_from_durable_log(
 
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/jpeg"
-    mock_client.get.assert_awaited_once()  # the pod WAS consulted, then fell through
+    # BOTH live-pod sources are consulted before the durable feed: the per-id endpoint
+    # (404 — old broker) then the conversation-history recovery (also 404 here), then durable.
+    assert mock_client.get.await_count == 2
     with Image.open(io.BytesIO(resp.content)) as img:
         assert max(img.size) <= 400
+
+
+# --- (8b) Finding-3: per-id 404 + durable MISS, but the live history has the image --
+
+
+@pytest.mark.asyncio
+async def test_preview_old_broker_recovered_from_live_history_and_warms(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lexi-frontend-presentation shape: an OLD broker 404s the per-id endpoint AND
+    the durable rebuild misses the big image ids — but the pod's FULL conversation-history
+    still carries them inline. The preview must be recovered from that history, WITHOUT any
+    durable read, and the one fetch must warm every image in the session."""
+    event_log = _CountingEventLog()  # durable log is EMPTY → a durable scan would miss
+    client, repository, cache, _ = _build(tmp_path, event_log)
+    session = await _running_session(repository)
+
+    history_body = {
+        "turns": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu-hist",
+                        "content": _image_envelope(1000, 500),
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu-hist-2",
+                        "content": _image_envelope(400, 800),
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu-text",
+                        "content": "not an image " * 100,
+                    },
+                ],
+            }
+        ]
+    }
+    mock_client = _patch_pod_routes(
+        tool_result=_pod_response(404, None),
+        history=_pod_response(200, history_body),
+    )
+    with monkeypatch.context() as m:
+        client_cls = MagicMock()
+        client_cls.return_value.__aenter__.return_value = mock_client
+        m.setattr("volundr.adapters.inbound.rest.httpx.AsyncClient", client_cls)
+        resp = client.get(_PREVIEW_PATH.format(sid=session.id, tuid="tu-hist"))
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    with Image.open(io.BytesIO(resp.content)) as img:
+        assert max(img.size) <= 400
+    # Recovered from the LIVE HISTORY, not the durable log (which is empty).
+    assert event_log.read_after_calls == 0
+    # The per-id endpoint (404) AND the history (200) were both consulted.
+    assert mock_client.get.await_count == 2
+    # One fetch warmed EVERY image in the history; the text result was skipped.
+    assert cache.has(str(session.id), "tu-hist-2")
+    assert not cache.has(str(session.id), "tu-text")
 
 
 # --- (9) live pod serves the envelope → preview without touching the durable log ---
