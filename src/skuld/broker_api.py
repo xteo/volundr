@@ -1,5 +1,6 @@
 """FastAPI composition and HTTP route handlers for the Skuld broker."""
 
+import json
 import logging
 import mimetypes
 import os
@@ -371,6 +372,85 @@ async def get_tool_result(tool_use_id: str) -> dict:
             }
 
     raise HTTPException(status_code=404, detail=f"tool_result not found: {tool_use_id}")
+
+
+@app.get("/api/conversation/tool-result/{tool_use_id}/files/{file_uuid}")
+async def download_send_user_file(tool_use_id: str, file_uuid: str) -> FileResponse:
+    """Serve a file from a matched native ``SendUserFile`` call/result pair."""
+    try:
+        canonical_uuid = str(uuid.UUID(file_uuid))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found") from None
+    if canonical_uuid != file_uuid.lower():
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found")
+
+    sources = [turn.parts for turn in broker._conversation_turns]
+    in_progress = broker._serialize_in_progress_turn()
+    if in_progress is not None:
+        sources.append(in_progress.get("parts", []))
+
+    call: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    for parts in sources:
+        for block in parts:
+            if not isinstance(block, dict):
+                continue
+            if (
+                block.get("type") == "tool_use"
+                and block.get("id") == tool_use_id
+                and str(block.get("name") or "").lower() == "senduserfile"
+            ):
+                call = block
+            elif (
+                block.get("type") == "tool_result"
+                and block.get("tool_use_id") == tool_use_id
+                and not bool(block.get("is_error", False))
+            ):
+                result = block
+
+    if call is None or result is None:
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found")
+
+    payload = result.get("content", {})
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = {}
+    attachments = payload.get("attachments", []) if isinstance(payload, dict) else []
+    attachment = next(
+        (
+            item
+            for item in attachments
+            if isinstance(item, dict) and str(item.get("file_uuid") or "").lower() == canonical_uuid
+        ),
+        None,
+    )
+    if attachment is None:
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found")
+
+    raw_path = attachment.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found")
+
+    call_input = call.get("input") if isinstance(call.get("input"), dict) else {}
+    requested = call_input.get("files", [])
+    if not isinstance(requested, list) or raw_path not in requested:
+        raise HTTPException(status_code=404, detail="SendUserFile attachment not found")
+
+    try:
+        resolved = Path(raw_path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=410, detail="file no longer available") from None
+    if not resolved.is_file():
+        raise HTTPException(status_code=410, detail="file no longer available")
+    if resolved.stat().st_size > broker._settings.max_presented_file_bytes:
+        raise HTTPException(status_code=413, detail="file exceeds max_presented_file_bytes")
+
+    media_type = str(attachment.get("media_type") or "").strip()
+    if not media_type:
+        media_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    return FileResponse(resolved, filename=resolved.name, media_type=media_type)
 
 
 # --- Capabilities API ---

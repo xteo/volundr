@@ -4570,6 +4570,7 @@ from skuld.broker_api import (  # noqa: E402, F401
     get_aggregate_logs,
     get_conversation_history,
     get_tool_result,
+    download_send_user_file,
     _SlashCommandRequest,
     get_capabilities,
     get_plan,
