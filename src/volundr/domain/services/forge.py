@@ -212,18 +212,26 @@ class ForgeService:
         activity_state: SessionActivityState,
         metadata: dict | None,
         state_since: datetime | None = None,
+        turn_started_at: datetime | None = None,
     ) -> Session:
         # FAULT A: the REST endpoint passes ``state_since=`` (the broker-stamped
         # UTC transition time). The facade previously dropped it, so the kwarg
         # raised TypeError on EVERY activity report — swallowed into a false 204,
         # so activity_state never persisted and the SSE never fired. Forward it.
+        # ``turn_started_at`` (the stable turn anchor) hit the same trap: added to
+        # the REST endpoint and the deep service but not this facade, so every
+        # activity report raised TypeError → 500. Any new activity kwarg MUST be
+        # threaded through here too.
         # Forward only when present so existing 3-positional callers/mocks stay
-        # exactly equivalent (the deep method defaults state_since itself).
+        # exactly equivalent (the deep method defaults both kwargs itself).
+        kwargs: dict = {}
         if state_since is not None:
-            return await self._session_service.update_activity(
-                session_id, activity_state, metadata, state_since=state_since
-            )
-        return await self._session_service.update_activity(session_id, activity_state, metadata)
+            kwargs["state_since"] = state_since
+        if turn_started_at is not None:
+            kwargs["turn_started_at"] = turn_started_at
+        return await self._session_service.update_activity(
+            session_id, activity_state, metadata, **kwargs
+        )
 
     async def archive_session(
         self,
