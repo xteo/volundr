@@ -704,7 +704,9 @@ async def present_file(body: dict) -> dict:
         raise HTTPException(500, "could not stage file") from None
     _presented_registry[file_id] = str(dest)
 
-    await broker._emit_broker_frame(_build_present_file_turn(file_id, name, mime, size, caption))
+    turn = _build_present_file_turn(file_id, name, mime, size, caption)
+    broker._append_turn(turn)
+    await broker._channels.broadcast({"type": "conversation.turn", "turn": asdict(turn)})
     logger.info(
         "present-file: staged %s (%d bytes) as %s",
         repr(name),
@@ -716,28 +718,19 @@ async def present_file(body: dict) -> dict:
 
 def _build_present_file_turn(
     file_id: str, name: str, mime: str, size: int, caption: str | None
-) -> dict:
-    """A self-contained assistant `conversation.turn` carrying the file as a `present_file` tool_use
-    part (no inline bytes). PASS-1 authoritative → survives reconnect + the durable rebuild."""
+) -> ConversationTurn:
+    """Build a turn shared by live memory, durable log, and broadcast paths."""
     tool_input: dict = {"file_id": file_id, "name": name, "mime": mime, "size": size}
     if caption:
         tool_input["caption"] = caption
     part = {"id": file_id, "name": "present_file", "type": "tool_use", "input": tool_input}
-    return {
-        "type": "conversation.turn",
-        "turn": {
-            "id": str(uuid.uuid4()),
-            "role": "assistant",
-            "parts": [part],
-            "content": caption or name,
-            "metadata": {"cost": None, "model": None, "usage": {}, "present_file": True},
-            "thread_id": None,
-            "created_at": datetime.now(UTC).isoformat(),
-            "visibility": "public",
-            "participant_id": None,
-            "participant_meta": None,
-        },
-    }
+    return ConversationTurn(
+        id=str(uuid.uuid4()),
+        role="assistant",
+        parts=[part],
+        content=caption or name,
+        metadata={"cost": None, "model": None, "usage": {}, "present_file": True},
+    )
 
 
 @app.get("/api/files/presented/{file_id}")
