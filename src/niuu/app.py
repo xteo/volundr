@@ -674,6 +674,13 @@ def build_root_app(
     if prefix_apps:
         root.add_middleware(_PrefixDispatchMiddleware, prefix_apps=prefix_apps)
 
+    # Wire compression (2026-07-12) — see niuu.gzip_sse for the numbers + SSE safety. Added
+    # AFTER the prefix dispatch so gzip is the OUTERMOST layer and covers the mounted plugin
+    # APIs (the forge conversation windows are the payloads that need it most).
+    from niuu.gzip_sse import SSESafeGZipMiddleware
+
+    root.add_middleware(SSESafeGZipMiddleware, minimum_size=4096)
+
     _install_merged_openapi(
         root=root,
         sub_apps=sub_apps,
