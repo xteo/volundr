@@ -245,3 +245,106 @@ class TestShallowEndpoints:
         self._seed()
         client = TestClient(app, raise_server_exceptions=False)
         assert client.get("/api/conversation/tool-result/nope").status_code == 404
+
+
+# ── P1 (2026-07-12): tool_use INPUT elision ─────────────────────────────────────────────────
+# Measured on the lexi-frontend-presentation session, tool_use.input was 59% of a 1.5 MB
+# shallow window (Edit old/new strings, Write bodies) while the UI renders one bounded
+# argument line per collapsed card. Shallow now elides heavy inputs to
+# {"_elided_input": true, "byte_size": N, "preview": <primary arg>} — still a dict — and the
+# per-result lazy endpoint carries the FULL input for the expand.
+
+from skuld.conversation_shallow import elide_tool_use_block, is_elided_input  # noqa: E402
+
+BIG_INPUT = {"file_path": "/repo/App.swift", "old_string": "Y" * 3000, "new_string": "Z" * 3000}
+
+
+class TestToolUseInputElision:
+    def test_big_input_elides_to_placeholder_with_primary_arg_preview(self):
+        block = {"type": "tool_use", "id": "e1", "name": "Edit", "input": dict(BIG_INPUT)}
+        out = elide_tool_use_block(block)
+        assert is_elided_input(out["input"])
+        assert out["input"]["byte_size"] > INLINE_BYTE_LIMIT
+        # preview = the primary argument line (file_path outranks the heavy strings)
+        assert out["input"]["preview"] == "/repo/App.swift"
+        # everything else on the block is untouched
+        assert out["id"] == "e1" and out["name"] == "Edit" and out["type"] == "tool_use"
+
+    def test_small_input_passes_through_and_elision_is_idempotent(self):
+        small = {"type": "tool_use", "id": "s1", "name": "Bash", "input": {"command": "ls"}}
+        assert elide_tool_use_block(small) is small
+        big = elide_tool_use_block(
+            {
+                "type": "tool_use",
+                "id": "e2",
+                "name": "Write",
+                "input": {"file_path": "/f", "content": "W" * 3000},
+            }
+        )
+        again = elide_tool_use_block(big)
+        assert again["input"] == big["input"], "an already-elided input never re-elides"
+
+    def test_shallow_endpoint_elides_input_and_full_keeps_it(self):
+        broker._conversation_turns = [
+            ConversationTurn(
+                id="a9",
+                role="assistant",
+                content="editing",
+                parts=[
+                    {"type": "tool_use", "id": "edit9", "name": "Edit", "input": dict(BIG_INPUT)},
+                    _tool_result("edit9", SMALL),
+                ],
+            ),
+        ]
+        client = TestClient(app, raise_server_exceptions=False)
+        full = client.get("/api/conversation/history").json()
+        shallow = client.get("/api/conversation/history", params={"detail": "shallow"}).json()
+        full_use = next(p for p in full["turns"][0]["parts"] if p.get("id") == "edit9")
+        shallow_use = next(p for p in shallow["turns"][0]["parts"] if p.get("id") == "edit9")
+        assert full_use["input"]["old_string"] == "Y" * 3000
+        assert is_elided_input(shallow_use["input"])
+        assert shallow_use["input"]["preview"] == "/repo/App.swift"
+
+    def test_tool_result_fetch_carries_the_full_input(self):
+        broker._conversation_turns = [
+            ConversationTurn(
+                id="a10",
+                role="assistant",
+                content="editing",
+                parts=[
+                    {"type": "tool_use", "id": "edit10", "name": "Edit", "input": dict(BIG_INPUT)}
+                ],
+            ),
+            ConversationTurn(
+                id="u10",
+                role="user",
+                content="",
+                parts=[_tool_result("edit10", SMALL)],
+            ),
+        ]
+        client = TestClient(app, raise_server_exceptions=False)
+        body = client.get("/api/conversation/tool-result/edit10").json()
+        assert body["content"] == SMALL
+        assert body["input"]["old_string"] == "Y" * 3000, "use + result live in different turns"
+
+    def test_input_only_hit_returns_200_for_running_tool(self):
+        broker._conversation_turns = [
+            ConversationTurn(
+                id="a11",
+                role="assistant",
+                content="running",
+                parts=[
+                    {
+                        "type": "tool_use",
+                        "id": "run11",
+                        "name": "Write",
+                        "input": {"file_path": "/f", "content": "W" * 3000},
+                    }
+                ],
+            ),
+        ]
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/conversation/tool-result/run11")
+        assert resp.status_code == 200
+        assert resp.json()["content"] == ""
+        assert resp.json()["input"]["file_path"] == "/f"

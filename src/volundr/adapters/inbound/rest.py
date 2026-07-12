@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Res
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turns
+from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turns, is_elided_input
 from skuld.tool_result_preview import (
     PreviewCache,
     PreviewUnavailableError,
@@ -2701,6 +2701,17 @@ def create_router(
             ge=0,
             description="Skip N turns from the end before applying `limit` (Show-earlier paging).",
         ),
+        after: int = Query(
+            -1,
+            ge=-1,
+            description=(
+                "P2 incremental fetch (2026-07-12): return only turns with ABSOLUTE index > "
+                "`after` (-1 = disabled). Sessions are append-only, so a client that cached the "
+                "settled prefix asks for `after=<lastCachedIndex>` and pays only for new turns. "
+                "Takes precedence over limit/before; window_offset = after+1 keeps absolute "
+                "indices derivable."
+            ),
+        ),
     ) -> dict:
         """Return conversation history from a live session or stopped-session workspace.
 
@@ -2723,7 +2734,13 @@ def create_router(
                 return payload
             all_turns = payload["turns"]
             total = len(all_turns)
-            if limit > 0:
+            if after >= 0:
+                # P2 incremental window: everything past the client's cached prefix. An `after`
+                # at/beyond the end returns an empty list with the true total — the no-op poll.
+                start = min(after + 1, total)
+                turns = all_turns[start:]
+                window_offset = start
+            elif limit > 0:
                 end = max(0, total - before)
                 start = max(0, end - limit)
                 turns = all_turns[start:end]
@@ -2932,20 +2949,40 @@ def create_router(
         """
 
         def _scan(turns: list) -> dict | None:
+            # P1 input elision (2026-07-12): the response also carries the matching tool_use's
+            # FULL ``input`` so an elided-input card can expand from the same lazy fetch. The
+            # use and result blocks live in DIFFERENT turns (assistant emits the use; the
+            # result rides the next user event), so collect both across the whole scan. An
+            # input-only hit (tool still running, result not yet emitted) now answers 200 with
+            # empty content instead of 404 — the expand shows the input immediately.
+            found_result: dict | None = None
+            found_input = None
             for turn in turns:
                 parts = turn.get("parts") if isinstance(turn, dict) else None
                 for block in parts or []:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "tool_result"
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use" and block.get("id") == tool_use_id:
+                        candidate = block.get("input")
+                        if candidate is not None and not is_elided_input(candidate):
+                            found_input = candidate
+                    elif (
+                        block.get("type") == "tool_result"
                         and block.get("tool_use_id") == tool_use_id
                     ):
-                        return {
-                            "tool_use_id": tool_use_id,
-                            "content": block.get("content", ""),
-                            "is_error": bool(block.get("is_error", False)),
-                        }
-            return None
+                        found_result = block
+                if found_result is not None and found_input is not None:
+                    break
+            if found_result is None and found_input is None:
+                return None
+            out = {
+                "tool_use_id": tool_use_id,
+                "content": (found_result or {}).get("content", ""),
+                "is_error": bool((found_result or {}).get("is_error", False)),
+            }
+            if found_input is not None:
+                out["input"] = found_input
+            return out
 
         # Live-history turns recovered from an old broker (source 2). Handed back as the warm-pass
         # source even when the specific id was not found there, since they are still a richer source

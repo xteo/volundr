@@ -70,7 +70,7 @@ from skuld.channels import (
 )
 from skuld.chronicle_watcher import ChronicleWatcher
 from skuld.config import SkuldSettings
-from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turn
+from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turn, is_elided_input
 from skuld.room_bridge import RoomBridge
 from skuld.room_mesh_bridge import RoomMeshBridge
 from skuld.service_manager import (
@@ -6789,15 +6789,13 @@ async def get_tool_result(tool_use_id: str) -> dict:
     tool_result exists in this session.
     """
 
-    def _find(parts: list[dict]) -> dict | None:
-        for block in parts:
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_result"
-                and block.get("tool_use_id") == tool_use_id
-            ):
-                return block
-        return None
+    # P1 input elision (2026-07-12): the response also carries the matching tool_use's FULL
+    # ``input`` so an elided-input card expands from the same lazy fetch. Use and result live
+    # in DIFFERENT turns (assistant emits the use; the result rides the next user event), so
+    # collect both across all sources. An input-only hit (tool still running) answers 200 with
+    # empty content instead of 404 — the expand shows the input immediately.
+    found_result: dict | None = None
+    found_input = None
 
     sources = [turn.parts for turn in broker._conversation_turns]
     in_progress = broker._serialize_in_progress_turn()
@@ -6805,13 +6803,27 @@ async def get_tool_result(tool_use_id: str) -> dict:
         sources.append(in_progress.get("parts", []))
 
     for parts in sources:
-        found = _find(parts)
-        if found is not None:
-            return {
-                "tool_use_id": tool_use_id,
-                "content": found.get("content", ""),
-                "is_error": bool(found.get("is_error", False)),
-            }
+        for block in parts:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("id") == tool_use_id:
+                candidate = block.get("input")
+                if candidate is not None and not is_elided_input(candidate):
+                    found_input = candidate
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") == tool_use_id:
+                found_result = block
+        if found_result is not None and found_input is not None:
+            break
+
+    if found_result is not None or found_input is not None:
+        out = {
+            "tool_use_id": tool_use_id,
+            "content": (found_result or {}).get("content", ""),
+            "is_error": bool((found_result or {}).get("is_error", False)),
+        }
+        if found_input is not None:
+            out["input"] = found_input
+        return out
 
     raise HTTPException(status_code=404, detail=f"tool_result not found: {tool_use_id}")
 
