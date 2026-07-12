@@ -3051,7 +3051,13 @@ def create_router(
                     _session_proxy_url(base_url, "api", "conversation", "history")
                 )
                 headers.update(routing_headers)
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                # WEDGE GRACE (2026-07-12): a huge session's broker can stall for seconds
+                # mid-append (it synchronously rewrites its whole conversation snapshot — a
+                # 496MB file on lexi-frontend-presentation), and a 10s read timeout here sent
+                # the client to the durable fallback, flipping the served turn space under a
+                # cached client. Give a busy-but-alive broker 20s to answer; a DEAD pod still
+                # fails fast (3s connect).
+                async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=3.0)) as client:
                     response = await client.get(
                         proxy_url,
                         headers=headers,
