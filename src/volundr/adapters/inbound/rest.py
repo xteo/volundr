@@ -162,23 +162,49 @@ def _workspace_dir_from_session(session: Session) -> FilePath | None:
     return None
 
 
-# FAULT-C durable-count cache: `session_id -> (event_log_seq, durable_turn_count)`. The FAULT-C
-# reconciliation needs the durable turn count to detect a desynced (short) live body, but rebuilding
-# the whole durable transcript on every poll is ~4s on a big session (profiled). The count is stable
-# while the event log hasn't grown, so we key the cached count on MAX(seq): a hit at the same seq
-# skips the rebuild entirely; a new seq (or a short live body) falls back to the exact rebuild.
-_DURABLE_COUNT_CACHE: dict[str, tuple[int, int]] = {}
+# FAULT-C durable cache: `session_id -> (event_log_seq, durable_turn_count, durable_tail_id)`.
+# The FAULT-C reconciliation needs the durable turn count to detect a desynced (short) live body,
+# but rebuilding the whole durable transcript on every poll is ~4s on a big session (profiled).
+# The count is stable while the event log hasn't grown, so we key the cached values on MAX(seq):
+# a hit at the same seq skips the rebuild entirely; a new seq (or a short live body) falls back
+# to the exact rebuild. `durable_tail_id` is the id of the rebuild's last non-in-progress turn —
+# the SEGMENTATION-vs-DESYNC discriminator (see the tail-id gate at the decision site).
+_DURABLE_COUNT_CACHE: dict[str, tuple[int, int, str | None]] = {}
 _DURABLE_COUNT_CACHE_MAX = 512
 
 
-def _durable_count_cache_put(session_id: str, seq: int, count: int) -> None:
+def _durable_count_cache_put(session_id: str, seq: int, count: int, tail_id: str | None) -> None:
     if (
         len(_DURABLE_COUNT_CACHE) >= _DURABLE_COUNT_CACHE_MAX
         and session_id not in _DURABLE_COUNT_CACHE
     ):
         # Crude bound: drop an arbitrary existing entry (FIFO-ish via iteration order).
         _DURABLE_COUNT_CACHE.pop(next(iter(_DURABLE_COUNT_CACHE)), None)
-    _DURABLE_COUNT_CACHE[session_id] = (seq, count)
+    _DURABLE_COUNT_CACHE[session_id] = (seq, count, tail_id)
+
+
+def _last_settled_turn_id(turns: object) -> str | None:
+    """Id of the last turn that is NOT an in-progress row (the comparable transcript tail).
+
+    Used by the FAULT-C tail-id gate: a broker that is genuinely BEHIND the durable log
+    (resumed from a stale snapshot) is missing trailing turns, so its settled tail id differs
+    from the rebuild's. A broker whose body merely SEGMENTS the same content differently
+    (e.g. `present_file` deliveries folded vs standalone) still ends on the same settled turn.
+    Interrupted-flush rows count as real tail (a crashed turn the live body lost IS a desync).
+    """
+    if not isinstance(turns, list):
+        return None
+    for t in reversed(turns):
+        if not isinstance(t, dict):
+            continue
+        if t.get("in_progress") is True:
+            continue
+        metadata = t.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("status") == "in_progress":
+            continue
+        tid = str(t.get("id") or "").strip()
+        return tid or None
+    return None
 
 
 # Sessions with an in-flight background durable-count warm (dedup so a burst of cold polls spawns
@@ -195,7 +221,12 @@ async def _warm_durable_count(
     try:
         durable = await forge.get_transcript(session_id)
         turns = durable.get("turns") if isinstance(durable, dict) else None
-        _durable_count_cache_put(sid_str, seq, len(turns) if isinstance(turns, list) else 0)
+        _durable_count_cache_put(
+            sid_str,
+            seq,
+            len(turns) if isinstance(turns, list) else 0,
+            _last_settled_turn_id(turns),
+        )
     except Exception:  # pragma: no cover - a background warmer must never crash the loop
         pass
     finally:
@@ -2712,6 +2743,17 @@ def create_router(
                 "indices derivable."
             ),
         ),
+        after_id: str | None = Query(
+            None,
+            description=(
+                "Seam identity echo for `after` (2026-07-12): the id the client holds for the "
+                "turn AT index `after`. If the server's turn at that index has a different id, "
+                "the client's cached index space no longer matches (transcript re-segmented or "
+                "rewritten) — the response then carries empty turns with window_offset=-1, which "
+                "the client's seam guard rejects, triggering a clean windowed refetch instead of "
+                "appending re-served turns as phantom messages."
+            ),
+        ),
     ) -> dict:
         """Return conversation history from a live session or stopped-session workspace.
 
@@ -2740,6 +2782,25 @@ def create_router(
                 start = min(after + 1, total)
                 turns = all_turns[start:]
                 window_offset = start
+                if after_id and after < total:
+                    anchor = all_turns[after]
+                    anchor_id = (
+                        str(anchor.get("id") or "").strip() if isinstance(anchor, dict) else ""
+                    )
+                    if anchor_id and anchor_id != after_id:
+                        # Seam identity mismatch: the turn at the client's cached seam is not
+                        # the turn the client cached (re-segmentation / rewrite). Return an
+                        # explicitly-invalid window; the client's `window_offset == seam`
+                        # guard rejects it and falls back to a clean windowed refetch.
+                        logger.info(
+                            "[seam] after_id mismatch session=%s after=%d held=%s server=%s",
+                            _sanitize_log(session_id),
+                            after,
+                            _sanitize_log(after_id),
+                            _sanitize_log(anchor_id),
+                        )
+                        turns = []
+                        window_offset = -1
             elif limit > 0:
                 end = max(0, total - before)
                 start = max(0, end - limit)
@@ -2843,11 +2904,10 @@ def create_router(
                             sid_str = str(session_id)
                             seq = await forge.durable_latest_seq(session_id)
                             cached = _DURABLE_COUNT_CACHE.get(sid_str)
-                            durable_count = (
-                                cached[1]
-                                if (cached is not None and seq > 0 and cached[0] == seq)
-                                else None
-                            )
+                            warm = cached is not None and seq > 0 and cached[0] == seq
+                            durable_count = cached[1] if warm and cached else None
+                            durable_tail = cached[2] if warm and cached else None
+                            live_tail = _last_settled_turn_id(live_turns)
                             if durable_count is None:
                                 # COLD: serve live immediately; warm the count off the request path.
                                 timings["fault_c_optimistic"] = 1.0
@@ -2856,8 +2916,20 @@ def create_router(
                                     asyncio.create_task(
                                         _warm_durable_count(forge, session_id, seq, sid_str)
                                     )
-                            elif durable_count > live_count:
+                            elif durable_count > live_count and durable_tail != live_tail:
                                 # WARM + desync: rebuild to return the fuller durable body (rare).
+                                #
+                                # TAIL-ID GATE (2026-07-12, the flip-flop fix): a higher durable
+                                # count alone is NOT a desync. The rebuild can legitimately SEGMENT
+                                # the same content into more turns than the live body (verified:
+                                # `present_file` deliveries were durable-only standalone turns, 31
+                                # vs 25 on the same session) — preferring durable then FLIPS the
+                                # served index space on every idle↔active transition, which a
+                                # windowed client renders as a full reshuffle and an incremental
+                                # (`after=`) client renders as PHANTOM re-appended turns. A broker
+                                # that is genuinely BEHIND (resumed from a stale snapshot, crashed
+                                # tail) ends on a DIFFERENT last settled turn — so only a tail-id
+                                # mismatch, not a count surplus, selects the durable body.
                                 t_dur = time.perf_counter()
                                 try:
                                     durable = await forge.get_transcript(session_id)
@@ -2872,19 +2944,28 @@ def create_router(
                                 rebuilt = (
                                     len(durable_turns) if isinstance(durable_turns, list) else 0
                                 )
-                                _durable_count_cache_put(sid_str, seq, rebuilt)
-                                if durable is not None and rebuilt > live_count:
+                                rebuilt_tail = _last_settled_turn_id(durable_turns)
+                                _durable_count_cache_put(sid_str, seq, rebuilt, rebuilt_tail)
+                                if (
+                                    durable is not None
+                                    and rebuilt > live_count
+                                    and rebuilt_tail != live_tail
+                                ):
                                     logger.info(
                                         "Live conversation for session %s is short "
-                                        "(%d turns) vs durable rebuild (%d turns); "
-                                        "preferring durable (FAULT C desync)",
+                                        "(%d turns, tail=%s) vs durable rebuild "
+                                        "(%d turns, tail=%s); preferring durable "
+                                        "(FAULT C desync)",
                                         _sanitize_log(session_id),
                                         live_count,
+                                        _sanitize_log(live_tail),
                                         rebuilt,
+                                        _sanitize_log(rebuilt_tail),
                                     )
                                     return _maybe_elide(durable)
                             else:
-                                # Warm + live complete (durable not ahead) — no rebuild.
+                                # Warm + live complete (durable not ahead, or same settled
+                                # tail = segmentation-only difference) — no rebuild, serve live.
                                 timings["fault_c_cached"] = 1.0
                         # A freshly-restarted broker already elided at the source;
                         # re-eliding here is idempotent (placeholders have no

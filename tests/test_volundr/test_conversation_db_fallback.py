@@ -414,9 +414,12 @@ async def test_running_short_live_body_falls_back_to_longer_durable(
     # The cold open serves the live body optimistically (no synchronous rebuild) and warms the
     # durable-count cache off the request path; the desync is corrected once that cache is warm
     # (steady state / next poll). Seed it warm so this asserts the CORRECTION path, not the open.
+    # The durable tail id (a reducer uuid5) differs from the live body's "live-a" — a REAL
+    # desync, so the tail-id gate lets the durable preference fire.
     rest_mod._DURABLE_COUNT_CACHE[str(session.id)] = (
         await event_log.latest_seq(session.id),
         len(expected_turns),
+        expected_turns[-1]["id"],
     )
 
     _, mock_client = _patch_live_pod(_renderable_short_live_body())
@@ -434,6 +437,122 @@ async def test_running_short_live_body_falls_back_to_longer_durable(
     assert len(body["turns"]) == 4
     assert body["turns"] == expected_turns
     assert body["turns"] != _renderable_short_live_body()["turns"]
+
+
+@pytest.mark.asyncio
+async def test_segmentation_surplus_same_tail_keeps_live_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAULT C tail-id gate (2026-07-12, the flip-flop fix): a durable rebuild that
+    counts MORE turns than the live body but ends on the SAME settled turn is a
+    SEGMENTATION difference (e.g. durable-only standalone `present_file` turns), NOT a
+    desynced broker — the live body must be kept verbatim. Before the gate, the count
+    surplus alone flipped the served index space on every idle↔active transition, which
+    an incremental (`after=`) client rendered as phantom re-appended turns."""
+    event_log = InMemorySessionEventLog()
+    client, repository = _build_client(
+        Session(name="x", model="m", status=SessionStatus.STOPPED), event_log
+    )
+    session = await _running_session(repository)
+    await event_log.append(_longer_crash_frames(session.id))
+
+    rows = await event_log.read_after(session.id, after_seq=0)
+    durable_turns = rebuild_turns(rows).turns
+    assert len(durable_turns) == 4
+
+    # Live body: FEWER turns (2 < 4) but the SAME last settled turn id as the rebuild —
+    # the broker is fully caught up; it just folds the same content into fewer rows.
+    live_body = {
+        "turns": [
+            {"id": "live-u", "role": "user", "content": "summarize the repo"},
+            {
+                "id": durable_turns[-1]["id"],
+                "role": "assistant",
+                "content": "merged tail turn",
+            },
+        ],
+        "is_active": False,
+        "last_activity": "",
+    }
+    rest_mod._DURABLE_COUNT_CACHE[str(session.id)] = (
+        await event_log.latest_seq(session.id),
+        len(durable_turns),
+        durable_turns[-1]["id"],
+    )
+
+    _, mock_client = _patch_live_pod(live_body)
+    with monkeypatch.context() as m:
+        client_cls = MagicMock()
+        client_cls.return_value.__aenter__.return_value = mock_client
+        m.setattr("volundr.adapters.inbound.rest.httpx.AsyncClient", client_cls)
+        resp = client.get(_CONV_PATH.format(sid=session.id))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    mock_client.get.assert_awaited_once()
+    # Same tail => live served verbatim; the durable body is NOT swapped in.
+    assert body["turns"] == live_body["turns"]
+    assert len(body["turns"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_after_id_match_returns_delta_and_mismatch_returns_invalid_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`after_id` seam echo (2026-07-12): with `after=<i>`, a matching `after_id`
+    returns the normal incremental window; a MISMATCHED `after_id` (the client's cached
+    index space no longer matches the server's) returns empty turns with
+    window_offset=-1 — a shape the client's `window_offset == seam` guard rejects,
+    triggering a clean windowed refetch instead of appending phantom turns."""
+    event_log = InMemorySessionEventLog()
+    client, repository = _build_client(
+        Session(name="x", model="m", status=SessionStatus.STOPPED), event_log
+    )
+    session = await _running_session(repository)
+    await event_log.append(_longer_crash_frames(session.id))
+
+    live_body = {
+        "turns": [
+            {"id": "live-u", "role": "user", "content": "summarize the repo"},
+            {"id": "live-a", "role": "assistant", "content": "Reading the source tree"},
+            {"id": "live-u2", "role": "user", "content": "now run the tests"},
+        ],
+        "is_active": False,
+        "last_activity": "",
+    }
+    # Warm cache with the SAME tail so FAULT C keeps the live body (isolates the seam check).
+    rest_mod._DURABLE_COUNT_CACHE[str(session.id)] = (
+        await event_log.latest_seq(session.id),
+        len(live_body["turns"]),
+        "live-u2",
+    )
+
+    def _get(params: dict) -> dict:
+        _, mock_client = _patch_live_pod(live_body)
+        with monkeypatch.context() as m:
+            client_cls = MagicMock()
+            client_cls.return_value.__aenter__.return_value = mock_client
+            m.setattr("volundr.adapters.inbound.rest.httpx.AsyncClient", client_cls)
+            resp = client.get(_CONV_PATH.format(sid=session.id), params=params)
+        assert resp.status_code == 200
+        return resp.json()
+
+    # MATCH: the id the client holds for index 0 is the server's turn-0 id → normal delta.
+    ok = _get({"after": 0, "after_id": "live-u"})
+    assert [t["id"] for t in ok["turns"]] == ["live-a", "live-u2"]
+    assert ok["window_offset"] == 1
+    assert ok["total_turns"] == 3
+
+    # MISMATCH: the client's cached space is stale → invalid window, no phantom turns.
+    bad = _get({"after": 0, "after_id": "some-other-id"})
+    assert bad["turns"] == []
+    assert bad["window_offset"] == -1
+    assert bad["total_turns"] == 3
+
+    # NO after_id: legacy behavior unchanged (identity check is opt-in).
+    legacy = _get({"after": 0})
+    assert [t["id"] for t in legacy["turns"]] == ["live-a", "live-u2"]
+    assert legacy["window_offset"] == 1
 
 
 @pytest.mark.asyncio
@@ -725,9 +844,11 @@ async def test_shallow_elides_on_fault_c_durable_return(
 
     # Warm the durable-count cache so the FAULT C desync correction fires on this call (the cold
     # open otherwise serves the live body optimistically and warms the count in the background).
+    # Durable tail id differs from "live-a" — a real desync per the tail-id gate.
     rest_mod._DURABLE_COUNT_CACHE[str(session.id)] = (
         await event_log.latest_seq(session.id),
         len(durable_turns),
+        durable_turns[-1]["id"],
     )
 
     _, mock_client = _patch_live_pod(short_live)
@@ -817,7 +938,9 @@ async def test_tool_result_live_pod_404_falls_back_to_durable_scan(
 
     assert resp.status_code == 200
     body = resp.json()
-    mock_client.get.assert_awaited_once()  # pod WAS consulted, then fell through
+    # Pod consulted TWICE — per-id endpoint (404) then the full-history recovery for
+    # old brokers (also 404 here) — before falling through to the durable scan.
+    assert mock_client.get.await_count == 2
     assert body["tool_use_id"] == "tu-big"
     assert body["content"] == big
     assert body["is_error"] is False
@@ -869,7 +992,8 @@ async def test_tool_result_absent_everywhere_404(
         resp = client.get(_TOOL_RESULT_PATH.format(sid=session.id, tuid="does-not-exist"))
 
     assert resp.status_code == 404
-    mock_client.get.assert_awaited_once()
+    # Per-id endpoint + full-history recovery both consulted before the durable miss.
+    assert mock_client.get.await_count == 2
 
 
 def _build_activity_client(
