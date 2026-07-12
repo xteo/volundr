@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from skuld.conversation_models import ConversationTurn
-from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turn
+from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turn, is_elided_input
 from skuld.event_log import FORGE_SESSIONS_PATH
 from skuld.file_routes import register_file_routes
 from skuld.path_security import (
@@ -347,15 +347,8 @@ async def get_tool_result(tool_use_id: str) -> dict:
     tool_result exists in this session.
     """
 
-    def _find(parts: list[dict]) -> dict | None:
-        for block in parts:
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_result"
-                and block.get("tool_use_id") == tool_use_id
-            ):
-                return block
-        return None
+    found_result: dict | None = None
+    found_input = None
 
     sources = [turn.parts for turn in broker._conversation_turns]
     in_progress = broker._serialize_in_progress_turn()
@@ -363,13 +356,27 @@ async def get_tool_result(tool_use_id: str) -> dict:
         sources.append(in_progress.get("parts", []))
 
     for parts in sources:
-        found = _find(parts)
-        if found is not None:
-            return {
-                "tool_use_id": tool_use_id,
-                "content": found.get("content", ""),
-                "is_error": bool(found.get("is_error", False)),
-            }
+        for block in parts:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("id") == tool_use_id:
+                candidate = block.get("input")
+                if candidate is not None and not is_elided_input(candidate):
+                    found_input = candidate
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") == tool_use_id:
+                found_result = block
+        if found_result is not None and found_input is not None:
+            break
+
+    if found_result is not None or found_input is not None:
+        out = {
+            "tool_use_id": tool_use_id,
+            "content": (found_result or {}).get("content", ""),
+            "is_error": bool((found_result or {}).get("is_error", False)),
+        }
+        if found_input is not None:
+            out["input"] = found_input
+        return out
 
     raise HTTPException(status_code=404, detail=f"tool_result not found: {tool_use_id}")
 

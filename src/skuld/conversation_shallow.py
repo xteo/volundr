@@ -130,6 +130,75 @@ def is_elided_block(block: Any) -> bool:
     )
 
 
+INPUT_PREVIEW_CHAR_LIMIT = 180
+"""Max characters of a tool_use input kept in the placeholder ``preview`` — matches the
+ONE bounded argument line the collapsed tool card renders."""
+
+_INPUT_PRIMARY_KEYS = (
+    "command",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "prompt",
+    "description",
+    "content",
+)
+"""Preview precedence — the argument a human recognizes the call by (mirrors the clients'
+bounded-argument pick: Bash→command, Read/Edit/Write→file_path, Grep→pattern, …)."""
+
+
+def _input_preview(input_obj: Any) -> str:
+    """The bounded one-line preview of a tool_use ``input`` (primary arg, else JSON prefix)."""
+    if isinstance(input_obj, dict):
+        for key in _INPUT_PRIMARY_KEYS:
+            value = input_obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value[:INPUT_PREVIEW_CHAR_LIMIT]
+        try:
+            return json.dumps(input_obj, ensure_ascii=False)[:INPUT_PREVIEW_CHAR_LIMIT]
+        except (TypeError, ValueError):
+            return ""
+    return str(input_obj)[:INPUT_PREVIEW_CHAR_LIMIT]
+
+
+def is_elided_input(input_obj: Any) -> bool:
+    """True when a tool_use ``input`` is the shallow placeholder (full input dropped)."""
+    return isinstance(input_obj, dict) and bool(input_obj.get("_elided_input"))
+
+
+def elide_tool_use_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT) -> Any:
+    """Return a tool_use block with a heavy ``input`` replaced by a placeholder.
+
+    P1 of the payload diet (2026-07-12): measured on the lexi-frontend-presentation
+    session, ``tool_use.input`` was 59% of a 1.5 MB shallow window (908 KB — every
+    Edit's old/new strings, Write bodies), while the transcript renders exactly one
+    bounded argument line per collapsed card. Inputs above ``inline_limit`` collapse
+    to ``{"_elided_input": true, "byte_size": N, "preview": <primary arg line>}``
+    — STILL A DICT, so clients that decode ``input`` as a string-keyed object are
+    untouched. The full input rides the existing per-result lazy endpoint
+    (``/tool-result/{tool_use_id}`` response gains ``input``), fetched on expand.
+    Non-tool_use blocks and already-elided inputs pass through unchanged.
+    """
+    if not isinstance(block, dict) or block.get("type") != "tool_use":
+        return block
+    input_obj = block.get("input")
+    if input_obj is None or is_elided_input(input_obj):
+        return block
+    byte_size = _content_byte_size(input_obj)
+    if byte_size <= inline_limit:
+        return block
+    return {
+        **block,
+        "input": {
+            "_elided_input": True,
+            "byte_size": byte_size,
+            "preview": _input_preview(input_obj),
+        },
+    }
+
+
 def elide_tool_result_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT) -> Any:
     """Return a placeholder for a heavy tool_result block, else the block unchanged.
 
@@ -167,10 +236,15 @@ def elide_tool_result_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT
 
 
 def elide_parts(parts: Any, *, inline_limit: int = INLINE_BYTE_LIMIT) -> Any:
-    """Elide every heavy tool_result in a turn's ``parts`` list (others unchanged)."""
+    """Elide every heavy tool_result AND tool_use input in a turn's ``parts`` list."""
     if not isinstance(parts, list):
         return parts
-    return [elide_tool_result_block(b, inline_limit=inline_limit) for b in parts]
+    return [
+        elide_tool_use_block(
+            elide_tool_result_block(b, inline_limit=inline_limit), inline_limit=inline_limit
+        )
+        for b in parts
+    ]
 
 
 def elide_turn(turn: Any, *, inline_limit: int = INLINE_BYTE_LIMIT) -> Any:
