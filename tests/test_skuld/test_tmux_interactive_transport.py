@@ -1354,6 +1354,43 @@ async def test_turn_end_flushes_uncorrelated_steer_to_active(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_correlated_prompt_captures_claude_native_session_id(tmp_path: Path) -> None:
+    """Resume-id fix (2026-07-13): ``cli_session_id`` used to report the TMUX NAME — a
+    restart passed it to ``claude --resume`` and silently lost the conversation. A
+    CORRELATED UserPromptSubmit (a prompt WE pasted into the main pane) provably belongs
+    to the main conversation, so its ``session_id`` is claude's native resume-capable id.
+    Uncorrelated prompts (teammate/subagent claude processes share this hook endpoint and
+    POST their OWN ids) must NOT capture."""
+    transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
+    await _collect_events(transport)
+    await transport.start()
+    tmux_name = transport._session_name
+    assert transport.session_id == tmux_name
+
+    # Uncorrelated prompt (a teammate pane's own hook) — no capture.
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "not ours",
+            "session_id": "11111111-2222-3333-4444-555555555555",
+        }
+    )
+    assert transport.session_id == tmux_name
+
+    # Correlated prompt (we pasted it) — capture claude's native id.
+    await transport.send_message("do the thing", msg_id="m-1")
+    await transport.handle_claude_hook(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "do the thing",
+            "session_id": "502f0634-1dc7-4bdb-9520-68f80c008cca",
+        }
+    )
+    assert transport.session_id == "502f0634-1dc7-4bdb-9520-68f80c008cca"
+    await transport.stop()
+
+
+@pytest.mark.asyncio
 async def test_turn_end_resolves_stale_prompt(tmp_path: Path) -> None:
     transport = FakeTmuxInteractiveTransport(str(tmp_path))
     events = await _collect_events(transport)

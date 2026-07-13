@@ -220,6 +220,11 @@ class TmuxInteractiveTransport(CLITransport):
         # broker port into the hook settings — avoiding the stale-port fragility of reviving an
         # old tmux. Empty -> a brand-new conversation. Wired from SkuldSessionConfig by the broker.
         self._resume_session_id = (resume_session_id or "").strip() or None
+        # Claude's NATIVE conversation id (the ~/.claude/projects/<ws>/<uuid>.jsonl basename),
+        # captured from correlated main-pane hook payloads. This — not the tmux session name —
+        # is what `claude --resume` accepts; reporting the tmux name as cli_session_id made
+        # every resume-aware restart silently start a FRESH conversation (2026-07-13).
+        self._claude_native_session_id: str | None = None
 
         self._session_name = self._safe_name(f"skuld-{self._forge_session_id}")[:80]
         base_socket_dir = Path(
@@ -409,7 +414,10 @@ class TmuxInteractiveTransport(CLITransport):
 
     @property
     def session_id(self) -> str | None:
-        return self._session_name
+        # Prefer the captured claude-native conversation id (resume-capable); the tmux
+        # session name is only a fallback identity for sessions that never correlated a
+        # prompt (e.g. driven exclusively from claude.ai — nothing pasted by the broker).
+        return self._claude_native_session_id or self._session_name
 
     @property
     def last_result(self) -> dict | None:
@@ -946,6 +954,14 @@ class TmuxInteractiveTransport(CLITransport):
             # Claude just took a user prompt into its flow. Correlate it back to the
             # message we pasted so the client can flip THAT steering bubble to active.
             msg_id, request_id = self._match_prompt_correlation(prompt_str)
+            # NATIVE-ID CAPTURE: a prompt that correlates to something WE pasted is provably
+            # the MAIN pane's conversation (teammate/subagent claude processes share this hook
+            # endpoint and POST their OWN session ids — blind capture would wire a restart to
+            # resume a subagent's conversation). Uncorrelated prompts are ignored.
+            if msg_id or request_id:
+                native = payload.get("session_id")
+                if isinstance(native, str) and native.strip():
+                    self._claude_native_session_id = native.strip()
             event: dict[str, Any] = {
                 "type": "terminal_prompt_submitted",
                 "event_type": "claude.prompt.submitted",
