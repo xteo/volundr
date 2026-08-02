@@ -491,10 +491,13 @@ async def get_plan() -> dict:
 
 
 @app.get("/api/agents")
-async def get_agents() -> dict:
-    """Agents/sub-processes running in this session: Task subagents + teammate panes."""
+async def get_agents(include_finished: bool = False) -> dict:
+    """Return active agents, optionally including recently completed subagents."""
     broker._reap_dead_teammates()
-    return {"agents": list(broker._running_agents.values())}
+    agents = [broker._enrich_agent_row(agent) for agent in broker._running_agents.values()]
+    if include_finished:
+        agents.extend(broker._finished_agents)
+    return {"agents": agents}
 
 
 @app.get("/api/slash-commands")

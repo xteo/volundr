@@ -29,6 +29,7 @@ from typing import Any
 
 from niuu.build_info import build_info
 from niuu.ports.cli import CLITransport, TransportCapabilities
+from skuld.agent_usage import AgentUsageTracker
 from skuld.transports.claude_env import claude_spawn_env
 from skuld.transports.mcp_config import build_claude_mcp_config
 from skuld.transports.subprocess import _DEFAULT_PERMISSION_MODE
@@ -357,6 +358,12 @@ class TmuxInteractiveTransport(CLITransport):
         # PostToolUse / SubagentStop emit the "stopped" agent_update, and lets the
         # Task and Subagent* signals for the same agent merge instead of duplicate.
         self._hook_agents: dict[str, dict[str, Any]] = {}
+        # Per-subagent token accounting. SubagentStart hands us the subagent's
+        # transcript_path; the tracker tails that JSONL incrementally so GET /api/agents can
+        # report a live cumulative token total per agent. Deliberately NOT stored on the agent
+        # dict — that dict is emitted verbatim to clients, and the on-disk path is broker-local
+        # detail, not wire contract.
+        self._agent_usage = AgentUsageTracker()
         # Ordered stack of in-flight Task-subagent ids (the Task tool_use_id). A Task tool
         # BLOCKS its parent, so every NON-Task tool hook between a Task PreToolUse and that
         # Task's PostToolUse belongs to the subagent on top. Push in
@@ -1341,7 +1348,13 @@ class TmuxInteractiveTransport(CLITransport):
         agent = self._hook_agents.pop(agent_id, None)
         if agent is None:
             return
-        agent = {**agent, "status": "failed" if is_error else "done"}
+        agent = {
+            **agent,
+            "status": "failed" if is_error else "done",
+            # Pairs with the existing started_at so a client can show a duration, and so a
+            # retained finished row is distinguishable from a live one by data, not by absence.
+            "ended_at": datetime.now(UTC).isoformat(),
+        }
         await self._emit_agent_update(agent, action="stopped")
 
     async def _surface_agent_started_from_task(
@@ -1379,6 +1392,11 @@ class TmuxInteractiveTransport(CLITransport):
             or self._coerce_str(payload.get("name"))
             or "subagent"
         )
+        # The hook's transcript_path is the ONLY place the subagent's JSONL location is
+        # handed to us — register it now so the tracker can tail tokens for this agent id.
+        transcript_path = self._coerce_str(payload.get("transcript_path"))
+        if agent_id and transcript_path:
+            self._agent_usage.register(agent_id, transcript_path)
         await self._start_agent(
             agent_id,
             kind="subagent",
@@ -2536,6 +2554,12 @@ class TmuxInteractiveTransport(CLITransport):
                 "log_path": str(pane.log_path),
             }
         )
+
+    @property
+    def agent_usage(self) -> AgentUsageTracker:
+        """Per-subagent token tracker. Duck-typed by the broker (``getattr(transport,
+        "agent_usage", None)``) so non-tmux transports simply report no token totals."""
+        return self._agent_usage
 
     @property
     def live_pane_ids(self) -> set[str]:

@@ -567,6 +567,7 @@ class Broker(
         # and so GET /api/plan / GET /api/agents can answer from live state.
         self._current_plan: dict[str, Any] | None = None
         self._running_agents: dict[str, dict[str, Any]] = {}
+        self._finished_agents: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
         # Capture the primary REPL by stable pane id; tmux can renumber indexes.
         self._primary_pane_id: str | None = None
 
@@ -2630,9 +2631,56 @@ class Broker(
         if not agent_id:
             return
         if data.get("action") == "stopped":
-            self._running_agents.pop(agent_id, None)
+            tracked = self._running_agents.pop(agent_id, None)
+            self._retain_finished_agent(agent_id, tracked, agent)
             return
         self._running_agents[agent_id] = dict(agent)
+
+    def _retain_finished_agent(
+        self,
+        agent_id: str,
+        tracked: dict[str, Any] | None,
+        stopped: dict[str, Any],
+    ) -> None:
+        """Retain a bounded, token-enriched history of completed subagents."""
+        merged = {**(tracked or {}), **stopped}
+        if merged.get("kind") != "subagent":
+            return
+        merged.setdefault("ended_at", datetime.now(UTC).isoformat())
+        row = self._enrich_agent_row(merged)
+        tracker = getattr(self._transport, "agent_usage", None)
+        if tracker is not None:
+            with suppress(Exception):
+                tracker.release(agent_id)
+        for existing in list(self._finished_agents):
+            if existing.get("id") == agent_id:
+                self._finished_agents.remove(existing)
+        self._finished_agents.append(row)
+
+    def _enrich_agent_row(self, agent: dict[str, Any]) -> dict[str, Any]:
+        """Add cumulative token usage and workflow identity to subagent rows."""
+        if agent.get("kind") != "subagent":
+            return agent
+        tracker = getattr(self._transport, "agent_usage", None)
+        if tracker is None:
+            return agent
+        agent_id = str(agent.get("id") or "")
+        if not agent_id:
+            return agent
+        try:
+            tokens = tracker.tokens_for(agent_id)
+            workflow = tracker.workflow_for(agent_id)
+        except Exception:
+            logger.debug("agent usage lookup failed for %s", agent_id, exc_info=True)
+            return agent
+        if tokens is None and not workflow:
+            return agent
+        row = dict(agent)
+        if tokens is not None:
+            row["tokens_used"] = tokens
+        if workflow and not row.get("workflow"):
+            row["workflow"] = workflow
+        return row
 
     def _track_pane_agent(self, data: dict[str, Any], *, opened: bool) -> None:
         """Treat a non-primary tmux pane as a teammate agent (agent-teams mode).
