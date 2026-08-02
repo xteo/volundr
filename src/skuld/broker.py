@@ -1183,6 +1183,11 @@ class Broker:
         # and so GET /api/plan / GET /api/agents can answer from live state.
         self._current_plan: dict[str, Any] | None = None
         self._running_agents: dict[str, dict[str, Any]] = {}
+        # Recently-finished SUBAGENT rows (ended_at + frozen final tokens_used), most recent
+        # last. Served ONLY on GET /api/agents?include_finished=1 — the default response stays
+        # exactly what it is today (running rows only), because the client's plane contract
+        # assumes every default row is live. Bounded so a long session can't grow it forever.
+        self._finished_agents: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
         # pane_id of the primary REPL pane, captured from the first index-0 pane we see. Keying the
         # primary by its STABLE id (not the brittle live pane_index, which tmux can renumber) stops
         # a teammate pane from ever being misclassified as the primary — or vice-versa.
@@ -3018,9 +3023,66 @@ class Broker:
         if not agent_id:
             return
         if data.get("action") == "stopped":
-            self._running_agents.pop(agent_id, None)
+            tracked = self._running_agents.pop(agent_id, None)
+            self._retain_finished_agent(agent_id, tracked, agent)
             return
         self._running_agents[agent_id] = dict(agent)
+
+    def _retain_finished_agent(
+        self,
+        agent_id: str,
+        tracked: dict[str, Any] | None,
+        stopped: dict[str, Any],
+    ) -> None:
+        """Park a stopped SUBAGENT row (with ended_at + its final token total) for
+        ``?include_finished=1``. Teammates keep vanishing exactly as they do today —
+        they are separate processes with no transcript to account for."""
+        merged = {**(tracked or {}), **stopped}
+        if merged.get("kind") != "subagent":
+            return
+        merged.setdefault("ended_at", datetime.now(UTC).isoformat())
+        # Freeze tokens NOW: the tracker's tail state is released right after, and the
+        # transcript is complete by the time SubagentStop fires.
+        row = self._enrich_agent_row(merged)
+        tracker = getattr(self._transport, "agent_usage", None)
+        if tracker is not None:
+            with contextlib.suppress(Exception):
+                tracker.release(agent_id)
+        # A re-stopped id replaces its earlier corpse instead of duplicating it.
+        for existing in list(self._finished_agents):
+            if existing.get("id") == agent_id:
+                self._finished_agents.remove(existing)
+        self._finished_agents.append(row)
+
+    def _enrich_agent_row(self, agent: dict[str, Any]) -> dict[str, Any]:
+        """Additive per-subagent enrichment: ``tokens_used`` (cumulative int) and
+        ``workflow`` (``wf_<id>``) when the transport can account for this agent.
+
+        Never 0-fills: an agent with no transcript, or whose transcript has no usage row
+        yet, emits NO ``tokens_used`` key at all. Non-subagent rows are returned unchanged
+        (same object), so the teammate half of the response is byte-identical to today."""
+        if agent.get("kind") != "subagent":
+            return agent
+        tracker = getattr(self._transport, "agent_usage", None)
+        if tracker is None:
+            return agent
+        agent_id = str(agent.get("id") or "")
+        if not agent_id:
+            return agent
+        try:
+            tokens = tracker.tokens_for(agent_id)
+            workflow = tracker.workflow_for(agent_id)
+        except Exception:  # accounting must never break the agents endpoint
+            logger.debug("agent usage lookup failed for %s", agent_id, exc_info=True)
+            return agent
+        if tokens is None and not workflow:
+            return agent
+        row = dict(agent)
+        if tokens is not None:
+            row["tokens_used"] = tokens
+        if workflow and not row.get("workflow"):
+            row["workflow"] = workflow
+        return row
 
     def _track_pane_agent(self, data: dict[str, Any], *, opened: bool) -> None:
         """Treat a non-primary tmux pane as a teammate agent (agent-teams mode).
@@ -6951,10 +7013,18 @@ async def get_plan() -> dict:
 
 
 @app.get("/api/agents")
-async def get_agents() -> dict:
-    """Agents/sub-processes running in this session: Task subagents + teammate panes."""
+async def get_agents(include_finished: bool = False) -> dict:
+    """Agents/sub-processes running in this session: Task subagents + teammate panes.
+
+    Subagent rows are enriched additively with ``tokens_used`` (cumulative, from the
+    agent's transcript) and ``workflow`` (``wf_<id>``) where known. ``include_finished=1``
+    appends recently-finished subagent rows (``status`` done/failed + ``ended_at`` + frozen
+    ``tokens_used``); the DEFAULT response stays running-rows-only, as clients assume."""
     broker._reap_dead_teammates()
-    return {"agents": list(broker._running_agents.values())}
+    agents = [broker._enrich_agent_row(agent) for agent in broker._running_agents.values()]
+    if include_finished:
+        agents.extend(broker._finished_agents)
+    return {"agents": agents}
 
 
 @app.get("/api/slash-commands")
