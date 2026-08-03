@@ -3222,6 +3222,15 @@ class Broker:
         """Forward a CLI event to all connected channels."""
         event_type = data.get("type", "unknown")
 
+        # ONE observation instant for this frame, captured before anything else and shared by
+        # BOTH the durable enqueue (the row's ``ts``) and the D1 per-tool timing stamps the
+        # reducer writes below. Sharing it is what makes live == durable EXACTLY: the rebuild
+        # reads this same instant back off the log row, so a reloaded transcript reports the
+        # identical started_at/ended_at/duration_ms the live viewer saw. Two independent
+        # ``now()`` calls would differ by microseconds and break byte-parity at the after_id
+        # seam (the 2205 lesson).
+        frame_ts = datetime.now(UTC)
+
         # Room-mode suppression decision, computed BEFORE the enqueue (INV-5): while
         # an explicit human room response is pending, the raw user/assistant/
         # content_block_delta/result transport echoes are dropped from the LIVE
@@ -3242,7 +3251,7 @@ class Broker:
         # exception is a room-suppressed echo (above): not broadcast ⇒ not logged,
         # keeping the durable log == the live stream (INV-5).
         if not suppress_channel_broadcast:
-            self._enqueue_event_log(data)
+            self._enqueue_event_log(data, ts=frame_ts)
 
         if event_type == "remote_control":
             # A remote-control transport reporting its pairing URL. Surface it as
@@ -3481,7 +3490,12 @@ class Broker:
             # SHARED reducer transition (the same enrichment a later log rebuild applies).
             tr_msg = data.get("message", {})
             tr_blocks = tr_msg.get("content", []) if isinstance(tr_msg, dict) else []
-            apply_tool_result_blocks(self._pending_accumulator(), tr_blocks)
+            # D1: ``frame_ts`` (== this frame's durable row ts) closes each tool — it stamps
+            # the tool_result part AND back-fills ended_at/duration_ms onto the open tool_use
+            # part. The accumulator shares the pending parts LIST object, and the back-fill
+            # mutates those part dicts in place, so both the in-progress serialization and the
+            # eventual flush carry the completed timing.
+            apply_tool_result_blocks(self._pending_accumulator(), tr_blocks, ts=frame_ts)
             self._pending_assistant_last_seq = self._event_log_seq
         elif event_type == "result":
             # A turn that reaches result is no longer blocked on the user; drop
@@ -3508,7 +3522,8 @@ class Broker:
             message = data.get("message", {})
             content_blocks = message.get("content", [])
             acc = self._pending_accumulator()
-            apply_assistant_blocks(acc, content_blocks)
+            # D1: ``frame_ts`` (== this frame's durable row ts) is the tool_use start stamp.
+            apply_assistant_blocks(acc, content_blocks, ts=frame_ts)
             self._pending_assistant_content = acc.content
             self._pending_assistant_last_seq = self._event_log_seq
 
@@ -4989,11 +5004,17 @@ class Broker:
                 return inner
         return None
 
-    def _enqueue_event_log(self, data: dict) -> None:
+    def _enqueue_event_log(self, data: dict, *, ts: datetime | None = None) -> None:
         """Buffer a raw CLI frame for durable persistence. Never raises.
 
         Runs for every frame regardless of attached channels — this is what
         guarantees no agent output is dropped when no client is connected.
+
+        ``ts`` lets the caller supply the frame's observation instant instead of
+        letting this method mint its own. ``_handle_cli_event`` passes the SAME
+        instant it hands the D1 per-tool timing stamps, so the durable row's ts
+        and the live wire's started_at/ended_at are one value (INV-4 parity). All
+        other callers omit it and get ``now()``, exactly as before.
         """
         if not self._settings.event_log_enabled or not self.volundr_api_url:
             return
@@ -5007,7 +5028,7 @@ class Broker:
             # arrival time, which skews replayed timelines whenever the POST
             # batch lags (rate-limit stalls, backend hiccups). Clients replay
             # these ts so an old session shows when things actually happened.
-            "ts": datetime.now(UTC).isoformat(),
+            "ts": (ts or datetime.now(UTC)).isoformat(),
         }
         role = data.get("role")
         if isinstance(role, str):

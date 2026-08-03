@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from niuu.domain.transcript_reducer import TOOL_ENDED_AT
+
 SHALLOW_DETAIL = "shallow"
 """``?detail=shallow`` query-param value that selects elided serialization."""
 
@@ -219,6 +221,13 @@ def elide_tool_result_block(block: Any, *, inline_limit: int = INLINE_BYTE_LIMIT
         "byte_size": byte_size,
         "preview": _content_preview(content),
     }
+    # D1 TIMING: this placeholder is REBUILT from scratch (unlike elide_tool_use_block, which
+    # spreads ``**block``), so any additive key must be copied across explicitly or shallow
+    # clients silently lose it. Carry the per-tool ``ended_at`` stamp. Omitted when absent, so
+    # a pre-D1 transcript elides to the exact same placeholder it did before.
+    ended_at = block.get(TOOL_ENDED_AT)
+    if ended_at:
+        placeholder[TOOL_ENDED_AT] = ended_at
     # IMAGE HINT: an image Read is always > 1 KB (base64) so it is ALWAYS elided, and the
     # placeholder above carries no type signal (the preview is a truncated base64 blob). Stamp
     # is_image / mime_type / dimensions so the client can hoist a thumbnail chip and size it by
