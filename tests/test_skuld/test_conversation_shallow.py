@@ -51,12 +51,13 @@ def _tool_use(uid: str) -> dict:
     return {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": "ls"}}
 
 
-def _tool_result(uid: str, content, is_error: bool = False) -> dict:
+def _tool_result(uid: str, content, is_error: bool = False, **extra) -> dict:
     return {
         "type": "tool_result",
         "tool_use_id": uid,
         "content": content,
         "is_error": is_error,
+        **extra,
     }
 
 
@@ -348,3 +349,75 @@ class TestToolUseInputElision:
         assert resp.status_code == 200
         assert resp.json()["content"] == ""
         assert resp.json()["input"]["file_path"] == "/f"
+
+
+# --------------------------------------------------------------------------- D1 tool timing
+#
+# Shallow is the mode the iOS transcript actually loads, so per-tool timing is only real if it
+# survives elision. ``elide_tool_use_block`` spreads ``**block`` and keeps it for free — but
+# ``elide_tool_result_block`` REBUILDS its placeholder from scratch, the same trap the image
+# hint had to be threaded through, so the ``ended_at`` copy needs its own pin.
+
+STARTED = "2026-08-03T10:00:00+00:00"
+ENDED = "2026-08-03T10:03:12+00:00"
+
+
+class TestToolTimingSurvivesElision:
+    def test_tool_use_timing_passes_through_input_elision(self):
+        block = {
+            "type": "tool_use",
+            "id": "timed",
+            "name": "Edit",
+            "input": dict(BIG_INPUT),
+            "started_at": STARTED,
+            "ended_at": ENDED,
+            "duration_ms": 192_000,
+        }
+        out = elide_tool_use_block(block)
+        assert is_elided_input(out["input"])  # the heavy input is gone...
+        assert out["started_at"] == STARTED  # ...and the timing is not
+        assert out["ended_at"] == ENDED
+        assert out["duration_ms"] == 192_000
+
+    def test_tool_result_placeholder_keeps_its_end_stamp(self):
+        out = elide_tool_result_block(_tool_result("timed", BIG, ended_at=ENDED))
+        assert out["truncated"] is True and "content" not in out
+        assert out["ended_at"] == ENDED
+
+    def test_pre_d1_result_placeholder_is_byte_identical_to_before(self):
+        """An untimed block must elide to the exact old placeholder — no empty ``ended_at``."""
+        out = elide_tool_result_block(_tool_result("plain", BIG))
+        assert "ended_at" not in out
+        assert set(out) == {"type", "tool_use_id", "is_error", "truncated", "byte_size", "preview"}
+
+    def test_timing_survives_the_shallow_endpoint(self):
+        broker._conversation_turns = [
+            ConversationTurn(
+                id="a12",
+                role="assistant",
+                content="ran a long tool",
+                parts=[
+                    {
+                        "type": "tool_use",
+                        "id": "slow12",
+                        "name": "Edit",
+                        "input": dict(BIG_INPUT),
+                        "started_at": STARTED,
+                        "ended_at": ENDED,
+                        "duration_ms": 192_000,
+                    },
+                    _tool_result("slow12", BIG, ended_at=ENDED),
+                ],
+            ),
+        ]
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            data = client.get("/api/conversation/history", params={"detail": "shallow"}).json()
+            parts = data["turns"][0]["parts"]
+            call = next(p for p in parts if p.get("id") == "slow12")
+            result = next(p for p in parts if p.get("tool_use_id") == "slow12")
+            assert call["duration_ms"] == 192_000
+            assert call["started_at"] == STARTED and call["ended_at"] == ENDED
+            assert result["truncated"] is True and result["ended_at"] == ENDED
+        finally:
+            broker._conversation_turns = []

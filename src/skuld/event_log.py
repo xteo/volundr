@@ -316,11 +316,14 @@ class EventLogMixin:
                 return inner
         return None
 
-    def _enqueue_event_log(self, data: dict) -> None:
+    def _enqueue_event_log(self, data: dict, *, ts: datetime | None = None) -> None:
         """Buffer a raw CLI frame for durable persistence. Never raises.
 
         Runs for every frame regardless of attached channels — this is what
         guarantees no agent output is dropped when no client is connected.
+
+        ``ts`` lets the CLI-event handler share one observation instant with
+        live transcript reduction. Other callers retain the prior behavior.
         """
         if not self._settings.event_log_enabled or not self.volundr_api_url:
             return
@@ -334,7 +337,7 @@ class EventLogMixin:
             # arrival time, which skews replayed timelines whenever the POST
             # batch lags (rate-limit stalls, backend hiccups). Clients replay
             # these ts so an old session shows when things actually happened.
-            "ts": datetime.now(UTC).isoformat(),
+            "ts": (ts or datetime.now(UTC)).isoformat(),
         }
         role = data.get("role")
         if isinstance(role, str):

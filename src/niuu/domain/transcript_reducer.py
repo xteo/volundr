@@ -56,6 +56,36 @@ _TURN_NAMESPACE = uuid.UUID("6f2d2e2a-7b1c-4e8a-9d3f-0a1b2c3d4e5f")
 # Per-reasoning-block summary cap (kept identical to the historical live + rebuild behaviour).
 _REASONING_TAIL = 500
 
+# --------------------------------------------------------------------------- D1 tool timing
+#
+# Per-tool wall-clock, stamped onto the CONVERSATION WIRE so a client can say "ran in 3m 12s"
+# about ONE tool (or one burst of tools) instead of deriving it from turn boundaries — which
+# over-counts, because a turn's span includes model thinking and prose, and a text→tools→
+# text→tools turn would report the SAME whole-run span on every burst inside it.
+#
+# Placement (the contract iOS/ForgeKit decodes against):
+#   * ``tool_use``    part → ``started_at``, ``ended_at``, ``duration_ms``
+#   * ``tool_result`` part → ``ended_at``
+# ALL THREE client-facing values ride the tool_use part on purpose: it is the block that
+# survives shallow elision by ``{**block}`` spread, and the one ForgeKit already decodes into
+# a typed struct. The tool_result stamp is the orphan-safe fallback (a result whose call was
+# in an already-flushed turn still reports when it landed).
+#
+# Every key is ADDITIVE and OMITTED ENTIRELY when unknown: a frame with no timestamp produces
+# the exact byte-identical part dict it produced before D1, so a stored transcript, an old
+# broker, and a client that never learned these keys are all unaffected.
+#
+# Honest semantics: "started" = when the broker OBSERVED the tool_use frame, "ended" = when it
+# observed the tool_result. On the tmux/Claude plane those come from PreToolUse/PostToolUse
+# hooks (millisecond-accurate boundaries); on SDK/streaming transports a message's tool_use
+# blocks arrive together, so parallel calls report overlapping windows. This is wall-clock
+# observation latency, NOT CPU time. A transport that knows better may stamp ``started_at`` /
+# ``ended_at`` on the raw block itself — the reducer prefers a block-carried stamp over the
+# frame ts, so hook-exact timing is a one-line transport change later.
+TOOL_STARTED_AT = "started_at"
+TOOL_ENDED_AT = "ended_at"
+TOOL_DURATION_MS = "duration_ms"
+
 # Synthetic / non-wire kinds: rows written to the durable log purely as derived
 # reducer SEEDS, never broadcast to a live channel (SRD FR-3 / FR-10). The broker
 # appends ``conversation.turn`` rows via ``Broker._append_turn`` so a fold (live OR
@@ -236,15 +266,22 @@ def steering_target_id(kind: str, payload: dict) -> str:
 # The live path calls them as frames stream; the batch path calls them while walking the list.
 
 
-def apply_assistant_blocks(acc: TurnAccumulator, content_blocks: list) -> None:
+def apply_assistant_blocks(
+    acc: TurnAccumulator, content_blocks: list, *, ts: datetime | str | None = None
+) -> None:
     """Fold an ``assistant`` frame's content blocks (text / thinking / tool_use) into ``acc``.
 
     Mirrors the live broker's accumulation EXACTLY: text blocks append to both ``parts`` and
     ``content`` (newline-joined), thinking blocks append a capped reasoning part, tool_use
     blocks append a tool card carrying subagent attribution when present.
+
+    ``ts`` is the frame's timestamp (D1 per-tool timing): when given, every tool_use part is
+    stamped ``started_at``. Optional and omitted-when-absent so every historical caller and
+    every stored transcript keeps its exact pre-D1 shape (see ``_stamp_iso``).
     """
     if not isinstance(content_blocks, list):
         return
+    started_at = _stamp_iso(ts)
     text_parts: list[str] = []
     for block in content_blocks:
         if not isinstance(block, dict):
@@ -267,6 +304,10 @@ def apply_assistant_blocks(acc: TurnAccumulator, content_blocks: list) -> None:
                 part["parent_tool_use_id"] = block.get("parent_tool_use_id")
             if block.get("agent_id") is not None:
                 part["agent_id"] = block.get("agent_id")
+            # D1: prefer a transport-stamped start (hook-exact) over the frame ts.
+            block_started = _stamp_iso(block.get(TOOL_STARTED_AT)) or started_at
+            if block_started:
+                part[TOOL_STARTED_AT] = block_started
             acc.parts.append(part)
     text_content = "\n".join(text_parts)
     if text_content:
@@ -306,23 +347,62 @@ def apply_thinking_delta(acc: TurnAccumulator, thinking: str) -> None:
         acc.reasoning += thinking
 
 
-def apply_tool_result_blocks(acc: TurnAccumulator, blocks: list) -> None:
+def apply_tool_result_blocks(
+    acc: TurnAccumulator, blocks: list, *, ts: datetime | str | None = None
+) -> None:
     """Enrich the OPEN assistant turn with tool_result blocks (a tool_result-only user event
     is NOT a new turn — it carries the output of the calls already in ``acc``).
+
+    ``ts`` is the frame's timestamp (D1 per-tool timing): when given, the tool_result part is
+    stamped ``ended_at`` AND the matching ``tool_use`` part already in ``acc.parts`` is
+    back-filled with ``ended_at`` + ``duration_ms``. The back-fill mutates the part dict IN
+    PLACE, which is what makes the live plane work: the broker's ``_pending_accumulator()``
+    hands the reducer the very same ``parts`` list object it serves from, so an in-progress
+    poll and the eventual flushed turn both see the completed timing.
     """
+    ended_at = _stamp_iso(ts)
     for block in blocks or []:
         if not (isinstance(block, dict) and block.get("type") == "tool_result"):
             continue
-        if not block.get("tool_use_id"):
+        tool_use_id = block.get("tool_use_id")
+        if not tool_use_id:
             continue
-        acc.parts.append(
-            {
-                "type": "tool_result",
-                "tool_use_id": block.get("tool_use_id"),
-                "content": block.get("content"),
-                "is_error": bool(block.get("is_error")),
-            }
-        )
+        part: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": block.get("content"),
+            "is_error": bool(block.get("is_error")),
+        }
+        # D1: prefer a transport-stamped end (hook-exact) over the frame ts.
+        block_ended = _stamp_iso(block.get(TOOL_ENDED_AT)) or ended_at
+        if block_ended:
+            part[TOOL_ENDED_AT] = block_ended
+        acc.parts.append(part)
+        if block_ended:
+            _close_tool_use(acc.parts, str(tool_use_id), block_ended)
+
+
+def _close_tool_use(parts: list[dict], tool_use_id: str, ended_at: str) -> None:
+    """Back-fill ``ended_at`` / ``duration_ms`` onto the tool_use part this result closes.
+
+    Scans ``parts`` in REVERSE for the most recent matching, still-open call. Deliberately
+    index-free: the state lives entirely in the accumulator's own parts list, so there is no
+    second structure that the live plane (which rebuilds a throw-away ``TurnAccumulator`` view
+    per frame) and the batch rebuild could get out of step on — the seam is parity-safe by
+    construction. A LATE / ORPHAN result (its call was in an already-flushed turn, or never
+    seen) simply finds nothing and is a no-op; the result part still carries its own
+    ``ended_at``.
+    """
+    for part in reversed(parts):
+        if part.get("type") != "tool_use" or str(part.get("id") or "") != tool_use_id:
+            continue
+        if TOOL_ENDED_AT in part:
+            continue  # already closed — a duplicate/replayed result must not re-stamp
+        part[TOOL_ENDED_AT] = ended_at
+        duration = _duration_ms(part.get(TOOL_STARTED_AT), ended_at)
+        if duration is not None:
+            part[TOOL_DURATION_MS] = duration
+        return
 
 
 def apply_tmux_rows(acc: TurnAccumulator, rows: list[str]) -> None:
@@ -548,7 +628,9 @@ def reduce_frames(
             continue
 
         if k == "assistant":
-            apply_assistant_blocks(acc, _content_blocks(p))
+            # D1: the frame's durable ts IS the tool_use start stamp — the same instant the
+            # live broker passes here as it enqueues the frame, so both planes agree exactly.
+            apply_assistant_blocks(acc, _content_blocks(p), ts=ts)
             acc.touch(ts, seq)
             continue
 
@@ -642,7 +724,8 @@ def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, 
     content = _user_string_content(payload) if kind == "user" else _confirmed_content(payload)
     if content is None:
         if kind == "user":
-            apply_tool_result_blocks(acc, _tool_result_blocks(payload))
+            # D1: the frame's durable ts IS the tool_result end stamp (see the assistant branch).
+            apply_tool_result_blocks(acc, _tool_result_blocks(payload), ts=ts)
             acc.touch(ts, seq)
         return
     uid = _user_id(payload, kind)
@@ -726,3 +809,37 @@ def _iso(ts: datetime | None) -> str:
         return ts.isoformat()
     except Exception:  # noqa: BLE001 — defensive; ts is best-effort metadata
         return str(ts)
+
+
+def _stamp_iso(ts: datetime | str | None) -> str | None:
+    """The ISO string to stamp for ``ts``, or None when there is nothing honest to stamp.
+
+    Accepts a ``datetime`` (the batch path reads ``SessionLogEntry.ts``; the live path passes
+    the very instant it hands ``_enqueue_event_log``) or an already-ISO string (a transport
+    that pre-stamped the raw block). Returns None — never ``""`` — for absent/empty input so
+    the caller OMITS the key rather than writing an empty stamp.
+    """
+    if ts is None:
+        return None
+    text = _iso(ts) if isinstance(ts, datetime) else str(ts)
+    return text or None
+
+
+def _duration_ms(started_at: Any, ended_at: str) -> int | None:
+    """Elapsed milliseconds between two ISO stamps, or None when it cannot be computed.
+
+    Both endpoints are read back as STRINGS (the start was already stamped onto the part), so
+    the arithmetic is identical on the live and rebuild planes — neither reaches for a
+    datetime the other does not have. A negative span (clock step / skew) clamps to 0 rather
+    than surfacing a nonsense "-3 ms" in a UI.
+    """
+    if not isinstance(started_at, str) or not started_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(ended_at)
+    except ValueError:
+        return None
+    if (start.tzinfo is None) != (end.tzinfo is None):
+        return None  # naive vs aware — not subtractable, and guessing would be a lie
+    return max(0, int((end - start).total_seconds() * 1000))

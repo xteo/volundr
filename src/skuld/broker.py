@@ -2814,6 +2814,11 @@ class Broker(
         """Forward a CLI event to all connected channels."""
         event_type = data.get("type", "unknown")
 
+        # Use one observation instant for both the durable event row and the
+        # live transcript reduction. Replaying the row will then reproduce the
+        # exact same tool timing fields that live clients observed.
+        frame_ts = datetime.now(UTC)
+
         # Room-mode suppression decision, computed BEFORE the enqueue (INV-5): while
         # an explicit human room response is pending, the raw user/assistant/
         # content_block_delta/result transport echoes are dropped from the LIVE
@@ -2834,7 +2839,7 @@ class Broker(
         # exception is a room-suppressed echo (above): not broadcast ⇒ not logged,
         # keeping the durable log == the live stream (INV-5).
         if not suppress_channel_broadcast:
-            self._enqueue_event_log(data)
+            self._enqueue_event_log(data, ts=frame_ts)
 
         if event_type == "remote_control":
             # A remote-control transport reporting its pairing URL. Surface it as
@@ -3073,7 +3078,7 @@ class Broker(
             # SHARED reducer transition (the same enrichment a later log rebuild applies).
             tr_msg = data.get("message", {})
             tr_blocks = tr_msg.get("content", []) if isinstance(tr_msg, dict) else []
-            apply_tool_result_blocks(self._pending_accumulator(), tr_blocks)
+            apply_tool_result_blocks(self._pending_accumulator(), tr_blocks, ts=frame_ts)
             self._pending_assistant_last_seq = self._event_log_seq
         elif event_type == "result":
             # A turn that reaches result is no longer blocked on the user; drop
@@ -3100,7 +3105,7 @@ class Broker(
             message = data.get("message", {})
             content_blocks = message.get("content", [])
             acc = self._pending_accumulator()
-            apply_assistant_blocks(acc, content_blocks)
+            apply_assistant_blocks(acc, content_blocks, ts=frame_ts)
             self._pending_assistant_content = acc.content
             self._pending_assistant_last_seq = self._event_log_seq
 
