@@ -3275,9 +3275,7 @@ def create_router(
                 if auth:
                     headers["Authorization"] = auth
                 tool_result_url, routing_headers = _http_proxy_target(
-                    _session_proxy_url(
-                        base_url, "api", "conversation", "tool-result", tool_use_id
-                    )
+                    _session_proxy_url(base_url, "api", "conversation", "tool-result", tool_use_id)
                 )
                 headers.update(routing_headers)
                 # Generous timeout: source 2 pulls the WHOLE inline transcript from an old
