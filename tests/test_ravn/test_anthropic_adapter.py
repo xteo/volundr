@@ -82,6 +82,75 @@ class TestAnthropicAdapterBuildRequest:
         )
         assert body["stream"] is True
 
+    def test_tool_result_keeps_only_schema_keys(self) -> None:
+        """A tool_result carrying extra keys is a 400 — prune before sending."""
+        adapter = AnthropicAdapter(api_key="k")
+        body = adapter._build_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "name": "read_file",
+                            "content": "ok",
+                            "is_error": False,
+                        }
+                    ],
+                }
+            ],
+            tools=[],
+            system="",
+            model="m",
+            max_tokens=100,
+            stream=False,
+        )
+        block = body["messages"][0]["content"][0]
+        assert "name" not in block
+        assert block == {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "ok",
+            "is_error": False,
+        }
+
+    def test_other_blocks_pass_through(self) -> None:
+        adapter = AnthropicAdapter(api_key="k")
+        body = adapter._build_request(
+            [
+                {
+                    "role": "assistant",
+                    "reasoning": "internal",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}},
+                    ],
+                }
+            ],
+            tools=[],
+            system="",
+            model="m",
+            max_tokens=100,
+            stream=False,
+        )
+        message = body["messages"][0]
+        assert "reasoning" not in message
+        assert message["content"][0] == {"type": "text", "text": "hi"}
+        assert message["content"][1]["name"] == "read_file"
+
+    def test_string_content_untouched(self) -> None:
+        adapter = AnthropicAdapter(api_key="k")
+        body = adapter._build_request(
+            [{"role": "user", "content": "plain"}],
+            tools=[],
+            system="",
+            model="m",
+            max_tokens=100,
+            stream=False,
+        )
+        assert body["messages"][0]["content"] == "plain"
+
 
 @respx.mock
 async def test_generate_success() -> None:

@@ -562,7 +562,6 @@ class RavnAgent:
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_call.id,
-                        "name": tool_call.name,
                         "content": result.content,
                         "is_error": result.is_error,
                     }

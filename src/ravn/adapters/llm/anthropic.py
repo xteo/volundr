@@ -35,12 +35,34 @@ _BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14"
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503})
 _DEFAULT_BASE_URL = "https://api.anthropic.com"
 
+# Everything the Messages API accepts inside a tool_result block. Any other key
+# is rejected outright ("tool_result.name: Extra inputs are not permitted"), so
+# history carrying one — an old checkpoint, another adapter's shape — has to be
+# pruned before it goes back on the wire.
+_TOOL_RESULT_KEYS = frozenset(
+    {"type", "tool_use_id", "content", "is_error", "cache_control", "citations"}
+)
 
-def _without_reasoning(messages: list[dict]) -> list[dict]:
-    """Remove prior internal reasoning from Anthropic input messages."""
-    return [
-        {key: value for key, value in message.items() if key != "reasoning"} for message in messages
-    ]
+
+def _pruned_block(block: object) -> object:
+    """Drop non-schema keys from a tool_result content block."""
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") != "tool_result":
+        return block
+    return {key: value for key, value in block.items() if key in _TOOL_RESULT_KEYS}
+
+
+def _for_api(messages: list[dict]) -> list[dict]:
+    """Strip internal reasoning and non-schema tool_result keys."""
+    cleaned: list[dict] = []
+    for message in messages:
+        out = {key: value for key, value in message.items() if key != "reasoning"}
+        content = out.get("content")
+        if isinstance(content, list):
+            out["content"] = [_pruned_block(block) for block in content]
+        cleaned.append(out)
+    return cleaned
 
 
 class AnthropicAdapter(LLMPort):
@@ -125,7 +147,7 @@ class AnthropicAdapter(LLMPort):
         body: dict = {
             "model": model or self._default_model,
             "max_tokens": effective_max_tokens,
-            "messages": _without_reasoning(messages),
+            "messages": _for_api(messages),
             "stream": stream,
         }
         system_blocks = self._build_system(system)
