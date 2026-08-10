@@ -44,6 +44,42 @@ _TOOL_RESULT_KEYS = frozenset(
 )
 
 
+# Models that still take the fixed-budget thinking shape. Everything else —
+# including anything released after this list was written — gets adaptive
+# thinking. That default direction is deliberate: `budget_tokens` is a hard 400
+# from Opus 4.7 onward, so treating an unknown model as legacy would break it on
+# the day it ships, while treating a legacy model as adaptive degrades to a
+# model that simply thinks less.
+_LEGACY_THINKING_MODELS: tuple[str, ...] = (
+    "claude-3",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+)
+
+
+def _uses_legacy_thinking(model: str) -> bool:
+    """True when *model* wants {"type": "enabled", "budget_tokens": N}."""
+    return model.startswith(_LEGACY_THINKING_MODELS)
+
+
+def _thinking_for_model(thinking: dict, model: str) -> dict:
+    """Translate a fixed-budget thinking request into the shape *model* accepts.
+
+    Callers ask for thinking in one vocabulary — a token budget — because that
+    is what the config exposes. Newer models replaced the budget with adaptive
+    thinking plus output_config.effort and reject the old field outright.
+    """
+    if thinking.get("type") != "enabled":
+        return thinking
+    if _uses_legacy_thinking(model):
+        return thinking
+    return {"type": "adaptive"}
+
+
 def _pruned_block(block: object) -> object:
     """Drop non-schema keys from a tool_result content block."""
     if not isinstance(block, dict):
@@ -101,9 +137,11 @@ class AnthropicAdapter(LLMPort):
         self._retry_base_delay = retry_base_delay
         self._timeout = timeout
 
-    def _headers(self, *, thinking_enabled: bool = False) -> dict[str, str]:
+    def _headers(self, *, thinking_enabled: bool = False, model: str = "") -> dict[str, str]:
         betas = [_BETA_PROMPT_CACHING]
-        if thinking_enabled:
+        # Adaptive thinking interleaves on its own; the beta is only meaningful
+        # for the models that still take a fixed budget.
+        if thinking_enabled and _uses_legacy_thinking(model or self._default_model):
             betas.append(_BETA_INTERLEAVED_THINKING)
         return {
             "x-api-key": self._api_key,
@@ -156,7 +194,7 @@ class AnthropicAdapter(LLMPort):
         if tools:
             body["tools"] = tools
         if thinking is not None:
-            body["thinking"] = thinking
+            body["thinking"] = _thinking_for_model(thinking, body["model"])
         return body
 
     async def _post_with_retry(
@@ -230,7 +268,7 @@ class AnthropicAdapter(LLMPort):
         )
 
         async with httpx.AsyncClient(
-            headers=self._headers(thinking_enabled=thinking_enabled),
+            headers=self._headers(thinking_enabled=thinking_enabled, model=model),
             timeout=self._timeout,
         ) as client:
             response = await self._post_with_retry(client, payload, stream=True)
@@ -361,7 +399,7 @@ class AnthropicAdapter(LLMPort):
         )
 
         async with httpx.AsyncClient(
-            headers=self._headers(thinking_enabled=thinking_enabled),
+            headers=self._headers(thinking_enabled=thinking_enabled, model=model),
             timeout=self._timeout,
         ) as client:
             response = await self._post_with_retry(client, payload, stream=False)
