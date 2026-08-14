@@ -371,6 +371,19 @@ class _Connection:
         method = str(frame.get("method") or "")
         params = frame.get("params") or {}
 
+        # The Phase-1 acceptance gate is a shim-side request log: proof that a
+        # real device's RPCs arrive HERE and not at another gateway. A clean
+        # `git diff` cannot show that — the failure mode of a slug collision is
+        # correct-looking traffic delivered to the wrong place, which looks
+        # identical from the app side.
+        if method != "connect":
+            logger.info(
+                "openclaw rpc: %s %s device=%s",
+                method,
+                params.get("sessionKey") or "",
+                (self._device_id or "?")[:12],
+            )
+
         if method == "connect":
             await self._on_connect(req_id, params)
             return
