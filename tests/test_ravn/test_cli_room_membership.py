@@ -19,6 +19,22 @@ from ravn.cli.room import RoomDef, room_app
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def hermetic_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Membership is about the room, not about the machine running the suite.
+
+    ``ravn join`` reads the operator's ~/.ravn/config.yaml as its default base
+    config, so without this the results depend on what the developer happens to
+    have configured — including whether their provider secrets are exported.
+    Tests that care about base-config resolution set their own home.
+    """
+    monkeypatch.setattr(
+        room_mod.Path, "home", classmethod(lambda cls: tmp_path_factory.mktemp("home"))
+    )
+
+
 @pytest.fixture
 def rooms_dir(tmp_path: Path) -> Path:
     return tmp_path / "rooms"
