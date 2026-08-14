@@ -40,10 +40,12 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from ravn.adapters.channels import openclaw_room
 from ravn.adapters.channels.openclaw_protocol import (
     SCOPES,
     TICK_EMIT_SECONDS,
@@ -104,6 +106,17 @@ class OpenClawGateway:
         self._prefix = getattr(config, "session_prefix", None) or f"agent:{self._agent_id}:"
         self._max_sessions = int(getattr(config, "max_live_sessions", 32))
         self._conns: set[_Connection] = set()
+        #: Collaboration rooms on this host, surfaced as sessions of their own. Discovered from
+        #: the rooms directory rather than configured, so `ravn room create` is the only step:
+        #: a room that exists here is a room that reaches the phone.
+        self._rooms_dir = Path(os.path.expanduser(getattr(config, "rooms_dir", "~/.ravn/rooms")))
+        self._room_clients: dict[str, openclaw_room.RoomClient] = {}
+        #: Human seat used when a device posts into a room. One identity for the operator, so a
+        #: message sent from the phone is the same participant as one sent from a terminal.
+        self._room_identity = str(getattr(config, "room_participant_id", "") or "human:damien")
+        #: Last turn id relayed per room, so the poller emits each turn exactly once.
+        self._room_cursor: dict[str, str] = {}
+        self._room_poller: asyncio.Task[None] | None = None
         self._app = self._build_app()
         self._seed_main_session()
 
@@ -155,7 +168,20 @@ class OpenClawGateway:
             )
         )
         logger.info("OpenClaw shim listening on %s:%s (agent=%s)", host, port, self._agent_id)
-        await server.serve()
+        # Started here rather than in __init__: asyncio.create_task needs a running loop, and the
+        # shim is constructed before one exists.
+        self.start_room_poller()
+        rooms = [ref.name for ref in openclaw_room.discover_rooms(self._rooms_dir)]
+        logger.info("OpenClaw shim rooms: %s", ", ".join(rooms) if rooms else "(none)")
+        try:
+            await server.serve()
+        finally:
+            if self._room_poller is not None:
+                self._room_poller.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._room_poller
+            for client in self._room_clients.values():
+                await client.aclose()
 
     # -- app ---------------------------------------------------------------
 
@@ -208,6 +234,10 @@ class OpenClawGateway:
     def agent_id(self) -> str:
         return self._agent_id
 
+    @property
+    def room_identity(self) -> str:
+        return self._room_identity
+
     def owns_session_key(self, key: str) -> bool:
         """Only keys this shim minted are addressable.
 
@@ -216,7 +246,94 @@ class OpenClawGateway:
         could pass ``telegram:8572736034`` and inject a turn into Damien's real
         thread, appending to its history.
         """
-        return isinstance(key, str) and key.startswith(self._prefix)
+        if not isinstance(key, str):
+            return False
+        return key.startswith(self._prefix) or self.room_for_key(key) is not None
+
+    # -- rooms -------------------------------------------------------------
+
+    def room_for_key(self, key: str) -> openclaw_room.RoomClient | None:
+        """The room a session key addresses, or None when it addresses no room.
+
+        Resolved against the rooms that exist on disk *now*, so a room created while the shim is
+        running is reachable without a restart — and one that was removed stops being addressable
+        rather than 404-ing from a stale cache.
+        """
+        name = openclaw_room.room_name_from_key(key)
+        if name is None or name == self._agent_id:
+            # `agent:travis:main` is the resident's own session, not a room.
+            return None
+        for ref in openclaw_room.discover_rooms(self._rooms_dir):
+            if ref.name != name:
+                continue
+            client = self._room_clients.get(name)
+            if client is None or client.ref != ref:
+                client = openclaw_room.RoomClient(ref)
+                self._room_clients[name] = client
+            return client
+        return None
+
+    async def room_session_rows(self) -> list[dict[str, Any]]:
+        """A ``sessions.list`` row per room on this host."""
+        rows: list[dict[str, Any]] = []
+        for ref in openclaw_room.discover_rooms(self._rooms_dir):
+            if ref.name == self._agent_id:
+                continue
+            client = self._room_clients.setdefault(ref.name, openclaw_room.RoomClient(ref))
+            participants = await client.participants()
+            history = await client.history(limit=1)
+            last = history[-1]["content"] if history else None
+            rows.append(
+                openclaw_room.session_row(
+                    ref,
+                    participants=participants,
+                    last_message=last,
+                    updated_at_ms=None,
+                    live=bool(participants),
+                )
+            )
+        return rows
+
+    async def _poll_rooms(self) -> None:
+        """Relay new room turns to subscribers.
+
+        The broker does not push, so a subscribed room is polled. The cursor is the last relayed
+        turn id rather than a timestamp: two turns can share a second, and a room where two agents
+        answer at once is exactly the case this must not drop or duplicate.
+        """
+        while True:
+            try:
+                await asyncio.sleep(openclaw_room.POLL_INTERVAL_S)
+                for name, client in list(self._room_clients.items()):
+                    key = client.ref.session_key
+                    if not any(conn.is_subscribed(key) for conn in list(self._conns)):
+                        continue
+                    messages = await client.history()
+                    if not messages:
+                        continue
+                    cursor = self._room_cursor.get(name)
+                    fresh = messages
+                    if cursor is not None:
+                        ids = [m.get("id") for m in messages]
+                        if cursor in ids:
+                            fresh = messages[ids.index(cursor) + 1 :]
+                    elif messages:
+                        # First poll for this room: adopt the tail without replaying the whole
+                        # transcript as if it had just been said. History already renders it.
+                        self._room_cursor[name] = str(messages[-1].get("id") or "")
+                        continue
+                    for message in fresh:
+                        self._room_cursor[name] = str(message.get("id") or "")
+                        await self.broadcast(key, "chat", {"state": "final", "message": message})
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A poller that dies takes every room's liveness with it.
+                logger.exception("room poll failed")
+
+    def start_room_poller(self) -> None:
+        if self._room_poller is None or self._room_poller.done():
+            self._room_poller = asyncio.create_task(self._poll_rooms())
 
     async def run_turn(self, session_key: str, message: str) -> str:
         """Start a Ravn turn and stream it to subscribers. Returns the run id."""
@@ -506,6 +623,10 @@ class _Connection:
     async def _on_sessions_list(self, req_id: str, params: dict[str, Any]) -> None:
         limit = int(params.get("limit") or 50)
         sessions = self._gw.store.list_sessions(limit=limit)
+        # Rooms are not in the store — they live in their own brokers — so they are appended
+        # here rather than mirrored, which would make the store a second source of truth for a
+        # transcript it does not own.
+        sessions = sessions + await self._gw.room_session_rows()
         await self._send(
             response_frame(
                 req_id,
@@ -533,6 +654,10 @@ class _Connection:
             await self._send(error_frame(req_id, ErrorCodes.NOT_FOUND, "unknown session"))
             return
         limit = int(params.get("limit") or 30)
+        room = self._gw.room_for_key(key)
+        if room is not None:
+            await self._send(response_frame(req_id, {"messages": await room.history(limit=limit)}))
+            return
         await self._send(
             response_frame(req_id, {"messages": self._gw.store.history(key, limit=limit)})
         )
@@ -554,6 +679,11 @@ class _Connection:
             return
         if not isinstance(message, str) or not message.strip():
             await self._send(error_frame(req_id, ErrorCodes.INVALID_REQUEST, "message is required"))
+            return
+
+        room = self._gw.room_for_key(key)
+        if room is not None:
+            await self._on_room_send(req_id, room, message)
             return
 
         idem = params.get("idempotencyKey")
@@ -582,3 +712,28 @@ class _Connection:
         if isinstance(idem, str) and idem:
             self._gw.store.record_idempotency(idem, key, run_id)
         await self._send(response_frame(req_id, {"runId": run_id, "ok": True}))
+
+    async def _on_room_send(
+        self, req_id: str, room: openclaw_room.RoomClient, message: str
+    ) -> None:
+        """Post a device's message into a room, as the operator's own seat.
+
+        The seat is (re)joined first: a room sweeps participants that stop sending presence, so a
+        phone that has been quiet since yesterday would otherwise post as a participant the room
+        no longer has, and be refused. Joining is idempotent and refreshes presence.
+        """
+        identity = self._gw.room_identity
+        await room.join(participant_id=identity)
+        if not await room.post(message, participant_id=identity):
+            await self._send(
+                error_frame(
+                    req_id,
+                    ErrorCodes.INTERNAL,
+                    "the room did not accept the message",
+                    details={"room": room.ref.name},
+                )
+            )
+            return
+        # The turn itself arrives over the poller, like every other room turn, so a message sent
+        # from this device renders by exactly the path a message sent from a terminal does.
+        await self._send(response_frame(req_id, {"runId": f"room-{room.ref.name}", "ok": True}))
