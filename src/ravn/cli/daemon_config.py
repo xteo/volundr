@@ -84,6 +84,15 @@ _SELF_DRIVING_SECTIONS = (
 )
 
 
+# Sections that belong to the resident's own deployment and are never a
+# member's to inherit. A room member is reached through the room; the gateway
+# channels are one specific process's front door, bound to fixed ports and
+# carrying that resident's identity. Inheriting them makes every member try to
+# bind the resident's Telegram/HTTP/OpenClaw ports — the member dies on
+# STARTUP_FAILURE if the resident is up, and impersonates it if it is not.
+_RESIDENT_ONLY_SECTIONS = ("gateway",)
+
+
 def quiet_overlay_yaml() -> str:
     """Render :func:`_quiet_overlay` as top-level YAML sections."""
     return yaml.safe_dump(_quiet_overlay(), sort_keys=False)
@@ -174,7 +183,9 @@ def build_member_config(
     a member joins to take part in the room, not to start generating its own
     work the moment it connects.
     """
-    config = dict(base or {})
+    config = {
+        key: value for key, value in (base or {}).items() if key not in _RESIDENT_ONLY_SECTIONS
+    }
 
     # A detached member's log is its only window, so INFO is the useful floor —
     # mesh, discovery and tool wiring all report there. Applied as a default so

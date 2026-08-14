@@ -110,6 +110,20 @@ def _rooms_dir_default() -> Path:
     return Path.home() / ".ravn" / "rooms"
 
 
+def _default_base_config() -> Path | None:
+    """Return the operator's own ravn.yaml, when they have one.
+
+    Without this, ``ravn join`` rendered a member config from library defaults
+    and inherited nothing the operator had configured — so a resident running
+    on ``claude-opus-5`` with extended thinking joined its own room as a
+    ``claude-sonnet-4-6`` member with thinking off, silently.  A member of a
+    room on this host should be the same agent this host runs; ``--base-config``
+    still overrides, and a missing file is simply no base.
+    """
+    path = Path.home() / ".ravn" / "config.yaml"
+    return path if path.is_file() else None
+
+
 # ---------------------------------------------------------------------------
 # Room definition  (persisted in room.yaml — the source of truth)
 # ---------------------------------------------------------------------------
@@ -996,8 +1010,9 @@ def join_room(
     if existing_pid is not None:
         stop_pids([existing_pid])
 
+    base_config_path = Path(base_config).expanduser() if base_config else _default_base_config()
     try:
-        base = load_base_config(Path(base_config).expanduser() if base_config else None)
+        base = load_base_config(base_config_path)
     except (OSError, ValueError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
@@ -1077,6 +1092,7 @@ def join_room(
     typer.echo(
         f"{resolved_handle!r} joined {room_def.name!r} as persona {effective_persona} (pid {pid})"
     )
+    typer.echo(f"  Base config: {base_config_path or 'none — library defaults'}")
     typer.echo(f"  Config: {config_path}")
     typer.echo(f"  Log:    {_member_log_path(room_def.name, resolved_dir, resolved_handle)}")
 

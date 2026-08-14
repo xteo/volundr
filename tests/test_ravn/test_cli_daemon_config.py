@@ -115,6 +115,31 @@ class TestBaseLayering:
         assert config["skuld"]["enabled"] is True
         assert config["skuld"]["broker_url"] == "ws://x/ws/ravn"
 
+    def test_the_residents_gateway_is_not_inherited(self) -> None:
+        """A member is reached through the room, never through a front door.
+
+        The operator's ravn.yaml is one specific resident's deployment: its
+        gateway block binds Telegram, an HTTP port and the OpenClaw shim on
+        fixed ports. Inherited, every member died on uvicorn STARTUP_FAILURE
+        against ports the resident already held — and would have impersonated
+        that resident had they been free.
+        """
+        base = {
+            "llm": {"model": "claude-opus-5"},
+            "gateway": {
+                "enabled": True,
+                "channels": {
+                    "openclaw": {"enabled": True, "port": 18790, "agent_id": "travis"},
+                    "telegram": {"enabled": True},
+                },
+            },
+        }
+
+        config = build_member_config(handle="neo", broker_url="ws://x/ws/ravn", base=base)
+
+        assert "gateway" not in config
+        assert config["llm"]["model"] == "claude-opus-5"
+
 
 class TestLoadBaseConfig:
     def test_none_yields_empty(self) -> None:

@@ -740,3 +740,33 @@ class TestPostMentionRouting:
         assert result.exit_code == 0, result.output
         assert posted == []
         assert "recipients: reviewer" in result.output
+
+
+class TestDefaultBaseConfig:
+    """A member inherits the operator's own config unless told otherwise.
+
+    Rendering a member from library defaults silently downgraded it: a resident
+    configured for claude-opus-5 with extended thinking joined its own room as
+    a claude-sonnet-4-6 member with thinking off.
+    """
+
+    def test_the_operator_config_is_the_default_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "home"
+        (home / ".ravn").mkdir(parents=True)
+        config = home / ".ravn" / "config.yaml"
+        config.write_text("llm:\n  model: claude-opus-5\n", encoding="utf-8")
+        monkeypatch.setattr(room_mod.Path, "home", classmethod(lambda cls: home))
+
+        assert room_mod._default_base_config() == config
+
+    def test_no_operator_config_means_no_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing file is simply no base — never an error, never a guess."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(room_mod.Path, "home", classmethod(lambda cls: home))
+
+        assert room_mod._default_base_config() is None
