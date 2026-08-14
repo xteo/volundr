@@ -110,6 +110,14 @@ gateway:
       enabled: true
       host: 127.0.0.1
       port: 7478
+    # The OpenClaw-protocol shim, on a DEV port. Validates the wire before the
+    # live Travis process is asked to carry it.
+    openclaw:
+      enabled: true
+      host: 127.0.0.1
+      port: 18791
+      agent_id: travis
+      store_path: ~/.ravn-dev/openclaw/state.db
 
 logging:
   level: info

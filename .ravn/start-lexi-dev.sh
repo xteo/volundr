@@ -23,6 +23,7 @@ while read -r var; do unset "$var"; done < <(
 
 set -a
 . "$HOME/.openclaw/secrets/anthropic.env"
+. "$HOME/.openclaw/secrets/ravn-openclaw.env"
 set +a
 
 # Belt and braces: if anything else in the environment carries the Telegram
