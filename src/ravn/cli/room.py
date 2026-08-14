@@ -40,6 +40,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -75,6 +76,12 @@ _DEFAULT_BROKER_URL = "http://127.0.0.1:9000"
 # failure, and how often they poll while waiting.
 _STARTUP_TIMEOUT_S = 30.0
 _STARTUP_POLL_INTERVAL_S = 0.25
+
+# Environment the room's broker must NOT inherit from whoever started it.
+# SKULD__* outranks the YAML config file, and the FORGE_* pair addresses the
+# caller's own broker; both would point the room at another session.
+_BROKER_ENV_STRIPPED_PREFIXES = ("SKULD__", "FORGE_")
+_BROKER_ENV_STRIPPED_KEYS = frozenset({"NIUU_CONFIG"})
 
 # HTTP timeout for the participation subcommands.
 _REQUEST_TIMEOUT_S = 10.0
@@ -326,6 +333,29 @@ def _write_broker_config(room_def: RoomDef, rooms_dir: Path) -> Path:
     return path
 
 
+def _broker_env(config_path: Path, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build the room broker's environment: the caller's, minus its Skuld identity.
+
+    ``SkuldSettings`` ranks ``SKULD__*`` environment variables **above** the YAML
+    file (``skuld/config.py`` ``settings_customise_sources``), so a room started
+    from inside a live Skuld session would inherit that session's identity and
+    silently ignore its own ``broker.yaml`` — adopting the caller's session id,
+    host, port and workspace, binding the wrong port, and reporting activity
+    against a session it does not own.  The room's config is the only thing that
+    may configure the room's broker, so those keys are dropped rather than
+    passed through.
+    """
+    source = os.environ if environ is None else environ
+    env = {
+        key: value
+        for key, value in source.items()
+        if not key.startswith(_BROKER_ENV_STRIPPED_PREFIXES)
+        and key not in _BROKER_ENV_STRIPPED_KEYS
+    }
+    env["NIUU_CONFIG"] = str(config_path)
+    return env
+
+
 def _spawn_broker(room_def: RoomDef, rooms_dir: Path) -> int:
     """Start the room's broker process detached and return its pid."""
     log_path = _log_path(room_def.name, rooms_dir)
@@ -334,7 +364,7 @@ def _spawn_broker(room_def: RoomDef, rooms_dir: Path) -> int:
     with open(log_path, "a") as log_fd:
         proc = subprocess.Popen(
             [sys.executable, "-m", "skuld"],
-            env={**os.environ, "NIUU_CONFIG": str(config_path)},
+            env=_broker_env(config_path),
             stdout=log_fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

@@ -572,6 +572,50 @@ class TestSpawnBroker:
         assert recorded["start_new_session"] is True
 
 
+class TestBrokerEnvIsolation:
+    """A room's broker is configured by its own YAML and nothing else.
+
+    ``SkuldSettings`` ranks ``SKULD__*`` above the YAML file, so inheriting the
+    caller's environment made a room started from inside a live Skuld session
+    adopt that session instead of its own — binding the caller's port and
+    reporting activity against a session the room does not own.
+    """
+
+    def test_the_caller_skuld_identity_is_not_inherited(self, tmp_path: Path) -> None:
+        caller = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/thor",
+            "SKULD__SESSION__ID": "a620413a-a3f3-455e-95e7-11e99ca578b5",
+            "SKULD__SESSION__WORKSPACE_DIR": "/home/thor/repos/lexi-ios",
+            "SKULD__PORT": "9121",
+            "SKULD__HOST": "127.0.0.1",
+            "SKULD__TRANSPORT": "tmux-interactive",
+            "FORGE_PRESENT_FILE_URL": "http://127.0.0.1:9121/api/present-file",
+        }
+
+        env = room_mod._broker_env(tmp_path / "broker.yaml", caller)
+
+        assert not [key for key in env if key.startswith(("SKULD__", "FORGE_"))]
+        assert env["NIUU_CONFIG"] == str(tmp_path / "broker.yaml")
+
+    def test_ordinary_environment_still_reaches_the_broker(self, tmp_path: Path) -> None:
+        """Stripping is surgical — the child still needs a PATH to run at all."""
+        caller = {"PATH": "/usr/bin", "HOME": "/home/thor", "SKULD__PORT": "9121"}
+
+        env = room_mod._broker_env(tmp_path / "broker.yaml", caller)
+
+        assert env["PATH"] == "/usr/bin"
+        assert env["HOME"] == "/home/thor"
+
+    def test_a_stale_config_pointer_cannot_survive(self, tmp_path: Path) -> None:
+        """NIUU_CONFIG is always the room's own, never the caller's."""
+        caller = {"NIUU_CONFIG": "/home/thor/.ravn/rooms/other/broker.yaml"}
+
+        env = room_mod._broker_env(tmp_path / "broker.yaml", caller)
+
+        assert env["NIUU_CONFIG"] == str(tmp_path / "broker.yaml")
+
+
 class TestDefaultRoomsDir:
     def test_defaults_under_the_ravn_home(self) -> None:
         assert room_mod._rooms_dir_default() == Path.home() / ".ravn" / "rooms"
