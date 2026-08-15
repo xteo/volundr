@@ -196,15 +196,32 @@ def _default_models() -> list[ManagedModelConfig]:
             supports_tools=True,
             supports_thinking=True,
         ),
+        # Model ids MUST match `grok models` exactly — the CLI rejects an unknown id,
+        # which kills the session at its first prompt (the "grok-build" outage).
         ManagedModelConfig(
-            id="grok-build",
-            name="Grok Build",
+            id="grok-4.6",
+            name="Grok 4.6 (Build)",
             vendor="xai",
             provider=ManagedModelProvider.CLOUD,
             tier=ManagedModelTier.FRONTIER,
             color="#1DA1F2",
-            description="xAI Grok Build agentic coding model (ACP over stdio).",
-            cost_per_million_tokens=None,  # TODO: set real grok-build blended rate
+            description=(
+                "xAI Grok 4.6 agentic coding model (ACP over stdio). Served as grok-4.6-build."
+            ),
+            cost_per_million_tokens=None,
+            session_definition="skuldGrok",
+            supports_tools=True,
+            supports_thinking=True,
+        ),
+        ManagedModelConfig(
+            id="grok-4.5",
+            name="Grok 4.5 (Build)",
+            vendor="xai",
+            provider=ManagedModelProvider.CLOUD,
+            tier=ManagedModelTier.FRONTIER,
+            color="#1DA1F2",
+            description="xAI Grok 4.5 agentic coding model (ACP over stdio).",
+            cost_per_million_tokens=None,
             session_definition="skuldGrok",
             supports_tools=True,
             supports_thinking=True,

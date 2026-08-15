@@ -36,12 +36,14 @@ class TestGrokACPTransport:
 
     @pytest.fixture
     def transport(self, tmp_path):
-        return GrokACPTransport(str(tmp_path), model="grok-build")
+        return GrokACPTransport(str(tmp_path), model="grok-4.6")
 
     def test_init_defaults_and_caps(self, tmp_path):
         t = GrokACPTransport(str(tmp_path))
         assert t.workspace_dir == str(tmp_path)
-        assert t.model == "grok-build"
+        # The default MUST be a real `grok models` id — "grok-build" never was, and the
+        # CLI rejects an unknown id while exiting 0, so the breakage was silent.
+        assert t.model == "grok-4.6"
         assert t.session_id is None
         assert t.last_result is None
         assert t.is_alive is False
@@ -78,10 +80,183 @@ class TestGrokACPTransport:
         assert _map_grok_tool("read_file") == "Read"
         assert _map_grok_tool("list_dir") == "LS"
         assert _map_grok_tool("grep") == "Grep"
-        assert _map_grok_tool("todo_write") == "Todo"
-        assert _map_grok_tool("spawn_subagent") == "Subagent"
-        # Unknowns pass through
+        assert _map_grok_tool("todo_write") == "TodoWrite"
+        assert _map_grok_tool("spawn_subagent") == "Task"
+        # opencode-namespace tools (Grok 1.0.x) — previously unmapped, so a Write
+        # rendered as the raw "write".
+        assert _map_grok_tool("write") == "Write"
+        assert _map_grok_tool("read") == "Read"
+        assert _map_grok_tool("bash") == "Bash"
+        assert _map_grok_tool("edit") == "Edit"
+        # Unknown WITH a CLI-supplied label uses the label, not the identifier.
+        assert _map_grok_tool("some_new_tool", "Some New Tool") == "Some New Tool"
+        # Unknowns with no label pass through
         assert _map_grok_tool("unknown_foo") == "unknown_foo"
+
+    # ------------------------------------------------------------------
+    # Hierarchical-mode parity (tool_use id + paired tool_result + timing)
+    #
+    # Every frame below is a VERBATIM capture from `grok agent … stdio` v1.0.4
+    # (see the module docstring). Writing them from the real wire is the point:
+    # the previous shape was invented and drifted from what Grok actually sends.
+    # ------------------------------------------------------------------
+
+    # Real tool_call frame — note _meta["x.ai/tool"] and the opencode namespace.
+    REAL_TOOL_CALL = {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-ef6a308a-ca23-4dc5-ac29-d23cb138b73b-0",
+        "title": "write",
+        "rawInput": {"file_path": "/tmp/grok-smoke/hello.txt", "content": "hello\n"},
+        "_meta": {
+            "x.ai/tool": {
+                "version": 1,
+                "name": "write",
+                "kind": "write",
+                "namespace": "opencode",
+                "label": "Write",
+                "read_only": False,
+            }
+        },
+    }
+
+    def test_tool_call_carries_the_acp_id_so_a_result_can_pair_to_it(self, tmp_path):
+        """Without an id nothing downstream can pair call->result.
+
+        This is the whole reason hierarchical mode showed Grok tool calls with no
+        output: the block was emitted with name+input only, so the transcript
+        reducer had no tool_use_id to match and per-tool timing had no start.
+        """
+        t = GrokACPTransport(str(tmp_path))
+        ev = t._map_acp_update(dict(self.REAL_TOOL_CALL))
+        block = ev["content"][0]
+        assert block["type"] == "tool_use"
+        assert block["id"] == "call-ef6a308a-ca23-4dc5-ac29-d23cb138b73b-0"
+        # Name comes from _meta.name through the map — NOT the raw title.
+        assert block["name"] == "Write"
+        # rawInput is the real argument carrier in ACP.
+        assert block["input"]["file_path"] == "/tmp/grok-smoke/hello.txt"
+
+    def test_completed_update_becomes_a_paired_tool_result_not_a_second_tool_use(self, tmp_path):
+        """A terminal update is a tool_result, correlated by tool_use_id.
+
+        Emitting another tool_use per update meant output never attached to its
+        call AND every tool tally multi-counted: a real 4-tool turn produced 13
+        tool_use blocks (4 calls + 9 progress updates).
+        """
+        t = GrokACPTransport(str(tmp_path))
+        t._map_acp_update(dict(self.REAL_TOOL_CALL))  # open the call first
+        ev = t._map_acp_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-ef6a308a-ca23-4dc5-ac29-d23cb138b73b-0",
+                "status": "completed",
+                "rawOutput": {"type": "Write", "path": "/tmp/grok-smoke/hello.txt"},
+            }
+        )
+        block = ev["content"][0]
+        assert block["type"] == "tool_result", "must be a result, never a second tool_use"
+        assert block["tool_use_id"] == "call-ef6a308a-ca23-4dc5-ac29-d23cb138b73b-0"
+        assert "Write" in block["content"]
+        assert not block.get("is_error")
+
+    def test_in_progress_updates_are_dropped(self, tmp_path):
+        """Progress is not a result — forwarding it is what inflated the counts."""
+        t = GrokACPTransport(str(tmp_path))
+        t._map_acp_update(dict(self.REAL_TOOL_CALL))
+        assert (
+            t._map_acp_update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": self.REAL_TOOL_CALL["toolCallId"],
+                    "status": "in_progress",
+                }
+            )
+            is None
+        )
+
+    def test_failed_update_marks_the_result_as_an_error(self, tmp_path):
+        t = GrokACPTransport(str(tmp_path))
+        t._map_acp_update(dict(self.REAL_TOOL_CALL))
+        ev = t._map_acp_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": self.REAL_TOOL_CALL["toolCallId"],
+                "status": "failed",
+                "rawOutput": "permission denied",
+            }
+        )
+        assert ev["content"][0]["is_error"] is True
+
+    def test_result_carries_per_tool_timing(self, tmp_path):
+        """D1 timing — the stamps hierarchical rows read for 'ran in 3m 12s'."""
+        from niuu.domain.transcript_reducer import TOOL_ENDED_AT
+
+        t = GrokACPTransport(str(tmp_path))
+        t._map_acp_update(dict(self.REAL_TOOL_CALL))
+        ev = t._map_acp_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": self.REAL_TOOL_CALL["toolCallId"],
+                "status": "completed",
+                "rawOutput": "ok",
+            }
+        )
+        block = ev["content"][0]
+        assert TOOL_ENDED_AT in block, "no end stamp => no duration on the row"
+        assert "started_at" in block, "start comes from the remembered open call"
+        assert block["started_at"] <= block[TOOL_ENDED_AT]
+
+    def test_uncorrelatable_update_is_dropped_rather_than_double_counted(self, tmp_path):
+        """No id => cannot become a tool_result; a bare tool_use would re-inflate."""
+        t = GrokACPTransport(str(tmp_path))
+        assert (
+            t._map_acp_update({"sessionUpdate": "tool_call_update", "status": "completed"}) is None
+        )
+
+    def test_four_real_tool_calls_yield_exactly_four_tool_uses(self, tmp_path):
+        """The regression in aggregate, on the real 1.0.4 event mix.
+
+        The captured turn was 4 tool_call + 9 tool_call_update frames. Before this
+        fix that rendered as 13 tool_use blocks; the truth is 4 calls and 4 results.
+        """
+        t = GrokACPTransport(str(tmp_path))
+        uses = results = 0
+        for i in range(4):
+            call = dict(self.REAL_TOOL_CALL, toolCallId=f"call-{i}")
+            ev = t._map_acp_update(call)
+            uses += sum(1 for b in ev["content"] if b["type"] == "tool_use")
+            # two progress updates then a terminal one, exactly as Grok streams them
+            for status in ("pending", "in_progress", "completed"):
+                out = t._map_acp_update(
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": f"call-{i}",
+                        "status": status,
+                        "rawOutput": "done",
+                    }
+                )
+                if out:
+                    results += sum(1 for b in out["content"] if b["type"] == "tool_result")
+        assert (uses, results) == (4, 4)
+
+    def test_plan_update_survives_for_the_plan_dock(self, tmp_path):
+        """Grok emits real ACP `plan` entries — the todo dock's data."""
+        t = GrokACPTransport(str(tmp_path))
+        ev = t._map_acp_update(
+            {
+                "sessionUpdate": "plan",
+                "entries": [
+                    {
+                        "content": "Run `echo hi` in bash",
+                        "priority": "medium",
+                        "status": "in_progress",
+                    },
+                    {"content": "Write plan.txt", "priority": "medium", "status": "pending"},
+                ],
+            }
+        )
+        assert ev["content"][0]["type"] == "plan"
+        assert len(ev["content"][0]["entries"]) == 2
 
     def test_thought_chunk_maps_to_thinking_delta(self, tmp_path):
         # Reasoning must map to a thinking_delta (separate reasoning block), never an
@@ -154,14 +329,19 @@ class TestGrokACPTransport:
             mock_exec.return_value = mock_process
             await transport.start()
 
-            # Verify command (grok agent --always-approve -m grok-build stdio)
+            # Verify command (grok agent --always-approve -m grok-4.6 stdio)
             call_args = mock_exec.call_args[0]
             assert call_args[0].endswith("grok")  # resolved via shutil.which, or "grok" default
             assert "agent" in call_args
             assert "--always-approve" in call_args
             assert "-m" in call_args
-            assert "grok-build" in call_args
+            assert "grok-4.6" in call_args
             assert "stdio" in call_args
+            # ORDERING IS LOAD-BEARING: agent-level flags must precede the `stdio`
+            # subcommand or clap rejects them ("unexpected argument '--always-approve'").
+            args = list(call_args)
+            assert args.index("--always-approve") < args.index("stdio")
+            assert args.index("-m") < args.index("stdio")
 
             # A headless `grok -p` auth preflight ran before the ACP agent spawn
             all_calls = [list(c.args) for c in mock_exec.call_args_list]

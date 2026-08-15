@@ -10,7 +10,11 @@ Authentication: relies on the grok CLI (XAI_API_KEY or cached auth.json).
 Install via the official xAI CLI installer so `grok` is on PATH inside the
 Skuld container/pod (or mount the binary).
 
-Model example: "grok-build" (default). Pass via Skuld session.model.
+Model ids come from `grok models` — currently "grok-4.6" (default) and "grok-4.5".
+Pass via Skuld session.model. An unknown id is fatal: the CLI answers
+`Couldn't set model '<id>': Invalid params: "unknown model id"` and exits non-zero.
+"grok-build" was such an id for months, which is why every Grok session died on
+its first prompt; the id is validated against `grok models` by the E2E suite.
 """
 
 import asyncio
@@ -19,8 +23,10 @@ import logging
 import os
 import shutil
 import signal
+from datetime import UTC, datetime
 from typing import Any
 
+from niuu.domain.transcript_reducer import TOOL_ENDED_AT
 from skuld.transports import (
     CLITransport,
     TransportCapabilities,
@@ -31,15 +37,39 @@ from skuld.transports import (
 
 logger = logging.getLogger("skuld.transport")
 
+
+def _utc_now_iso() -> str:
+    """UTC timestamp in the shape the transcript reducer expects for tool timing."""
+    return datetime.now(UTC).isoformat()
+
+
 # Grok ACP surfaces no token counts, so usage is estimated from streamed text at
 # this rough ratio (~4 chars/token) — enough for message_count/usage to advance.
 _CHARS_PER_TOKEN = 4
 
+# Default model id. MUST be one of `grok models`; an unknown id kills the session at
+# its first prompt. Overridden per session via Skuld session.model.
+GROK_DEFAULT_MODEL = "grok-4.6"
+
 # ---------------------------------------------------------------------------
 # Tool name mapping — Grok internal IDs -> normalized names (for UI parity)
 # ---------------------------------------------------------------------------
+#
+# Grok 1.0.x serves tools from TWO namespaces, visible in each tool_call's
+# ``_meta["x.ai/tool"]``:
+#   * ``grok_build``  — run_terminal_command, todo_write, …  (Grok's own)
+#   * ``opencode``    — write, read, edit, …                 (the opencode set)
+# A fixed map alone therefore goes stale every time either side adds a tool, and
+# in 1.0.4 the opencode names were already unmapped (a Write rendered as "write").
+#
+# So the map is now an OVERRIDE for the names we want spelled the Claude way — it
+# is what keeps Bash/Edit/Read identical across engines, which the hierarchical
+# row classifier keys on — and anything unmapped falls back to the CLI's OWN
+# ``label`` before the raw name. New Grok tools then arrive with a sensible title
+# instead of a snake_case identifier.
 
 _GROK_TOOL_MAP: dict[str, str] = {
+    # grok_build namespace
     "run_terminal_command": "Bash",
     "search_replace": "Edit",
     "read_file": "Read",
@@ -47,21 +77,56 @@ _GROK_TOOL_MAP: dict[str, str] = {
     "grep": "Grep",
     "web_search": "WebSearch",
     "web_fetch": "WebFetch",
-    "todo_write": "Todo",
-    "spawn_subagent": "Subagent",
+    "todo_write": "TodoWrite",
+    "spawn_subagent": "Task",
     "memory_search": "Memory",
+    # opencode namespace (1.0.x) — these were entirely unmapped
+    "bash": "Bash",
+    "write": "Write",
+    "read": "Read",
+    "edit": "Edit",
+    "list": "LS",
+    "glob": "Glob",
+    "patch": "Edit",
+    "todowrite": "TodoWrite",
+    "task": "Task",
+    "webfetch": "WebFetch",
 }
 
 
-def _map_grok_tool(name: str) -> str:
-    """Map a Grok tool name (from ACP) to a normalized display name."""
-    return _GROK_TOOL_MAP.get(name, name)
+def _map_grok_tool(name: str, label: str | None = None) -> str:
+    """Normalize a Grok tool name for UI parity.
+
+    Order: explicit map (cross-engine canonical spelling) → the CLI's own
+    ``label`` → the raw name. ``label`` comes from ``_meta["x.ai/tool"].label``.
+    """
+    key = (name or "").strip()
+    mapped = _GROK_TOOL_MAP.get(key) or _GROK_TOOL_MAP.get(key.lower())
+    if mapped:
+        return mapped
+    if label and label.strip():
+        return label.strip()
+    return key or "tool"
+
+
+def _grok_tool_meta(update: dict) -> dict:
+    """The ``x.ai/tool`` descriptor on a tool_call update (name/kind/label/read_only)."""
+    meta = update.get("_meta") or {}
+    tool = meta.get("x.ai/tool") if isinstance(meta, dict) else None
+    return tool if isinstance(tool, dict) else {}
+
+
+# ACP tool_call statuses that mean the call is FINISHED (so its result can be
+# paired and its duration stamped). Anything else is progress.
+_TERMINAL_TOOL_STATUSES = {"completed", "failed", "error", "cancelled", "canceled", "rejected"}
+_ERROR_TOOL_STATUSES = {"failed", "error", "rejected"}
 
 
 class GrokACPTransport(CLITransport):
     """Persistent ACP client over `grok agent stdio` (Scaldy / Grok Build pipeline).
 
-    - Spawns one long-lived `grok agent stdio --always-approve -m <model>` process.
+    - Spawns one long-lived `grok agent --always-approve -m <model> stdio` process
+      (agent-level flags MUST precede the `stdio` subcommand).
     - Performs ACP initialize + session/new on start().
     - send_message() issues session/prompt requests and streams mapped updates.
     - Rich events (message chunks, thoughts, tool calls, plans) are emitted as
@@ -76,7 +141,7 @@ class GrokACPTransport(CLITransport):
     def __init__(
         self,
         workspace_dir: str,
-        model: str = "grok-build",
+        model: str = GROK_DEFAULT_MODEL,
         session_id: str | None = None,
         grok_bin: str | None = None,
         skip_permissions: bool = True,
@@ -125,6 +190,9 @@ class GrokACPTransport(CLITransport):
         self._turn_reason_chars: int = 0
         self._turn_in_chars: int = 0
         self._stdout_reader: asyncio.StreamReader | None = None
+        # toolCallId -> {name, started_at}: open ACP tool calls awaiting their terminal
+        # update, so the result pairs to the right call and carries a real duration.
+        self._open_tool_calls: dict[str, dict[str, Any]] = {}
 
     async def _emit(self, data: dict) -> None:
         """Emit an event, tolerating both sync and async registered callbacks."""
@@ -295,6 +363,23 @@ class GrokACPTransport(CLITransport):
                             await self._emit(filtered)
                     continue
 
+                # REQUEST FROM THE AGENT (has BOTH `method` and `id`).
+                #
+                # This must be tested BEFORE the response branch below: an inbound
+                # request also carries an `id`, so it used to fall through, fail to
+                # match any pending future, and get parked in `_early_results` —
+                # where nobody ever answered it and the agent blocked until the
+                # prompt timed out. Worse, the agent numbers its requests from its
+                # own counter, so an agent id could collide with ours and wrongly
+                # resolve one of OUR futures.
+                #
+                # Anything we cannot service is refused immediately. A clean
+                # "unsupported" lets the agent fall back to doing the work itself;
+                # silence is the one answer that hangs it.
+                if data.get("method") and "id" in data:
+                    await self._handle_agent_request(data)
+                    continue
+
                 # Response to a request we sent
                 if "id" in data:
                     req_id = data["id"]
@@ -357,14 +442,94 @@ class GrokACPTransport(CLITransport):
         finally:
             self._pending.pop(req_id, None)
 
+    async def _handle_agent_request(self, data: dict) -> None:
+        """Answer an agent->client JSON-RPC request. Never leave one unanswered.
+
+        We advertise no client-side filesystem capability (see `_acp_initialize`), so
+        in practice Grok should not ask. This exists because the failure mode when it
+        does is invisible and total: the agent waits on a reply that never comes, the
+        tool never completes, and the whole turn dies at the prompt timeout having
+        done nothing. A prompt refusal is always better than silence — the agent can
+        then fall back to its own implementation.
+
+        `session/request_permission` is the one we answer affirmatively: the session
+        runs with `--always-approve`, so a permission prompt has exactly one answer.
+        """
+        req_id = data.get("id")
+        method = str(data.get("method") or "")
+
+        if method == "session/request_permission":
+            # Mirror the --always-approve contract. Pick the first "allow"-ish option
+            # the agent offered so we answer in its own vocabulary.
+            params = data.get("params") or {}
+            options = params.get("options") or []
+            chosen = None
+            for opt in options:
+                if isinstance(opt, dict) and "allow" in str(opt.get("kind", "")).lower():
+                    chosen = opt.get("optionId") or opt.get("id")
+                    break
+            if chosen is None and options and isinstance(options[0], dict):
+                chosen = options[0].get("optionId") or options[0].get("id")
+            outcome = (
+                {"outcome": "selected", "optionId": chosen}
+                if chosen is not None
+                else {"outcome": "cancelled"}
+            )
+            logger.debug("Grok ACP permission request auto-approved (%s)", chosen)
+            await self._acp_respond(req_id, result={"outcome": outcome})
+            return
+
+        logger.warning(
+            "Grok ACP requested %s, which this client does not implement — refusing so "
+            "the agent falls back instead of blocking",
+            method,
+        )
+        await self._acp_respond(
+            req_id,
+            error={"code": -32601, "message": f"client does not implement {method}"},
+        )
+
+    async def _acp_respond(
+        self, req_id: Any, *, result: dict | None = None, error: dict | None = None
+    ) -> None:
+        """Write a JSON-RPC response for an agent-initiated request."""
+        if self._process is None or self._process.stdin is None:
+            return
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id}
+        if error is not None:
+            payload["error"] = error
+        else:
+            payload["result"] = result or {}
+        try:
+            self._process.stdin.write((json.dumps(payload) + "\n").encode())
+            await self._process.stdin.drain()
+        except Exception as exc:  # pragma: no cover - pipe teardown races
+            logger.warning("Grok ACP failed to answer request %s: %r", req_id, exc)
+
     async def _acp_initialize(self) -> None:
+        # CLIENT CAPABILITIES ARE A PROMISE, NOT A WISH LIST.
+        #
+        # This used to advertise fs.readTextFile / fs.writeTextFile / terminal — none
+        # of which the transport implements. In ACP those flags tell the agent "the
+        # CLIENT will perform file I/O for you", so Grok stopped doing its own and
+        # sent us `fs/read_text_file` REQUESTS instead. Nothing answered them, so the
+        # agent blocked mid-tool: every file-touching turn hung until the 300 s prompt
+        # timeout, wrote nothing, and surfaced as "Grok just stops".
+        #
+        # Measured on grok 1.0.4, same prompt, only this declaration changed:
+        #   fs caps true  -> completed=False wrote_file=False inbound={fs/read_text_file}
+        #   fs caps false -> completed=True  wrote_file=True  inbound={}
+        #
+        # Grok runs as a local subprocess rooted in the workspace and is perfectly able
+        # to read and write for itself, so declaring false is both honest and better.
+        # `_handle_agent_request` is the backstop if a future version asks anyway.
         result = await self._acp_send(
             "initialize",
             {
-                "protocolVersion": "1",
+                # Integer, matching the agent's own `"protocolVersion": 1` in its reply.
+                "protocolVersion": 1,
                 "clientCapabilities": {
-                    "fs": {"readTextFile": True, "writeTextFile": True},
-                    "terminal": True,
+                    "fs": {"readTextFile": False, "writeTextFile": False},
                 },
             },
         )
@@ -498,46 +663,93 @@ class GrokACPTransport(CLITransport):
                 }
             return None
 
-        # Tool call started
+        # Tool call started.
+        #
+        # HIERARCHICAL PARITY (the reason this carries an id at all). The block used to
+        # be emitted WITHOUT ``id``, so nothing downstream could pair a call with its
+        # result: the transcript reducer had no tool_use_id to match, hierarchical mode
+        # could not attach output to a call, and per-tool timing had no start to close.
+        # ACP hands us ``toolCallId`` — it is now the block id, exactly as Codex uses
+        # its item_id.
         if su in ("tool_call", "toolCall", "tool_use"):
-            tool_name = update.get("tool") or update.get("name") or update.get("title") or "tool"
-            args = update.get("arguments") or update.get("input") or update.get("args") or {}
+            meta = _grok_tool_meta(update)
+            tool_name = (
+                meta.get("name")
+                or update.get("tool")
+                or update.get("name")
+                or update.get("title")
+                or "tool"
+            )
+            args = (
+                update.get("rawInput")
+                or update.get("arguments")
+                or update.get("input")
+                or update.get("args")
+                or {}
+            )
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except Exception:
                     args = {"raw": args}
-            normalized = _map_grok_tool(tool_name)
-            return {
-                "type": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": normalized,
-                        "input": args,
-                    }
-                ],
-            }
+            normalized = _map_grok_tool(tool_name, meta.get("label"))
+            call_id = update.get("toolCallId") or update.get("tool_call_id") or ""
+            if call_id:
+                # Remember the call so its update can be emitted as a paired tool_result
+                # under the SAME name, and its duration stamped on completion.
+                self._open_tool_calls[call_id] = {
+                    "name": normalized,
+                    "started_at": _utc_now_iso(),
+                }
+            block: dict = {"type": "tool_use", "name": normalized, "input": args}
+            if call_id:
+                block["id"] = call_id
+            return {"type": "assistant", "content": [block]}
 
-        # Tool progress / result update (optional, forward a lightweight marker)
+        # Tool progress / completion.
+        #
+        # A terminal status becomes a real ``tool_result`` paired by ``tool_use_id`` —
+        # NOT another tool_use. Emitting a second tool_use per update was doubly wrong:
+        # the output never attached to its call, and every UI tool tally counted the
+        # same tool two-to-three times (a 4-tool turn reported 13).
+        # Non-terminal updates are dropped: they are progress, and forwarding them was
+        # the source of that inflation.
         if su in ("tool_call_update", "toolCallUpdate", "tool_result"):
-            tool_name = update.get("tool") or update.get("name") or update.get("title") or "tool"
-            status = update.get("status") or update.get("kind") or "update"
-            normalized = _map_grok_tool(tool_name)
-            extra = update.get("result") or update.get("output") or {}
-            return {
-                "type": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "name": normalized,
-                        "input": {
-                            "status": status,
-                            **(extra if isinstance(extra, dict) else {"raw": extra}),
-                        },
-                    }
-                ],
+            call_id = update.get("toolCallId") or update.get("tool_call_id") or ""
+            status = str(update.get("status") or update.get("kind") or "").lower()
+            if status and status not in _TERMINAL_TOOL_STATUSES:
+                return None
+            open_call = self._open_tool_calls.pop(call_id, None) if call_id else None
+            payload = (
+                update.get("rawOutput")
+                if update.get("rawOutput") is not None
+                else update.get("result")
+                if update.get("result") is not None
+                else update.get("output")
+            )
+            if payload is None:
+                payload = update.get("content") or ""
+            if not isinstance(payload, str):
+                try:
+                    payload = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    payload = str(payload)
+            if not call_id:
+                # Un-correlatable: without an id this cannot become a tool_result, and a
+                # bare tool_use would re-introduce the double count. Drop it.
+                return None
+            block = {
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": payload,
             }
+            if status in _ERROR_TOOL_STATUSES:
+                block["is_error"] = True
+            # D1 per-tool timing — the stamp hierarchical rows read for "ran in 3m 12s".
+            block[TOOL_ENDED_AT] = _utc_now_iso()
+            if open_call and open_call.get("started_at"):
+                block["started_at"] = open_call["started_at"]
+            return {"type": "assistant", "content": [block]}
 
         # Plan (forward for observability; UI may render or ignore)
         if su in ("plan", "plan_update"):
