@@ -371,6 +371,28 @@ class ToolsConfig(BaseModel):
     )
 
 
+class RerankerConfig(BaseModel):
+    """Second-stage ranking for retrieved memories.
+
+    Off by default. Retrieval already over-fetches, so this only decides which candidates survive
+    the cut — an embedding is computed once without seeing the question, while a reranker judges
+    query and document together. A failure is never fatal: the retrieval order stands.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Rerank retrieved episodes before admitting them to the prompt.",
+    )
+    adapter: str = Field(
+        default="ravn.adapters.reranker.qwen.QwenRerankerAdapter",
+        description="Fully-qualified class path for the reranker adapter.",
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra kwargs forwarded to the reranker adapter constructor.",
+    )
+
+
 class EmbeddingConfig(BaseModel):
     """Embedding backend configuration for semantic memory search."""
 
@@ -4345,6 +4367,7 @@ class Settings(BaseSettings):
 
     # NIU-436: semantic memory
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    reranker: RerankerConfig = Field(default_factory=RerankerConfig)
     skill: SkillConfig = Field(default_factory=SkillConfig)
 
     # NIU-501: self-improvement loop
