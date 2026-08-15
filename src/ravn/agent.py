@@ -356,8 +356,15 @@ class RavnAgent:
                 "Failed to emit ravn.session.ended with outcome; continuing.", exc_info=True
             )
 
-    async def run_turn(self, user_input: str) -> TurnResult:
+    async def run_turn(self, user_input: str, *, recall_query: str | None = None) -> TurnResult:
         """Process one user turn and return the result.
+
+        *recall_query* is what memory is searched with, when it differs from what the model is
+        given. A room message reaches the agent wrapped in framing plus up to 4,000 characters of
+        prior room context; recalling on all of that embeds an average of the room's recent
+        chatter rather than the question, and searches documents averaging 158 characters with a
+        4,000-character vector. Defaults to *user_input*, which is correct for every trigger whose
+        prompt IS what was asked.
 
         Runs the full tool-call loop until the LLM produces a final response
         or the maximum number of iterations is reached.
@@ -396,11 +403,13 @@ class RavnAgent:
         # for outcome recording.
         memory_ctx = ""
         if self._prompt_builder is not None:
-            effective_system: SystemPrompt = await self._build_effective_system(user_input)
+            effective_system: SystemPrompt = await self._build_effective_system(
+                user_input, recall_query
+            )
         else:
             effective_system = self._system_prompt
             if self._memory is not None:
-                memory_ctx = await self._prefetch_or_fail(user_input)
+                memory_ctx = await self._prefetch_or_fail(recall_query or user_input)
                 if memory_ctx:
                     effective_system = f"{effective_system}\n\n{memory_ctx}"
 
@@ -683,7 +692,9 @@ class RavnAgent:
             episode=recorded_episode,
         )
 
-    async def _build_effective_system(self, user_input: str) -> SystemPrompt:
+    async def _build_effective_system(
+        self, user_input: str, recall_query: str | None = None
+    ) -> SystemPrompt:
         """Build the effective system prompt for this turn.
 
         When a PromptBuilder is configured, it handles memory context as a
@@ -692,14 +703,14 @@ class RavnAgent:
         """
         if self._prompt_builder is not None:
             if self._memory is not None:
-                memory_ctx = await self._prefetch_or_fail(user_input)
+                memory_ctx = await self._prefetch_or_fail(recall_query or user_input)
                 self._prompt_builder.set_memory_context(memory_ctx or "")
             return self._prompt_builder.render_blocks()
 
         # Legacy: plain-string system prompt with optional memory suffix.
         effective: str = self._system_prompt
         if self._memory is not None:
-            memory_ctx = await self._prefetch_or_fail(user_input)
+            memory_ctx = await self._prefetch_or_fail(recall_query or user_input)
             if memory_ctx:
                 effective = f"{self._system_prompt}\n\n{memory_ctx}"
         return effective
