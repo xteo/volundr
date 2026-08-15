@@ -629,6 +629,41 @@ class GrokACPTransport(CLITransport):
     # Event mapping (ACP -> broker-expected Claude-style events)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Event envelopes — Claude/Codex wire parity
+    # ------------------------------------------------------------------
+    #
+    # THE ENVELOPE IS NOT DECORATION. The broker's LIVE turn assembly reads
+    # `data["message"]["content"]` with no fallback (broker `_handle_cli_event`,
+    # the `event_type == "assistant"` branch), because that is the Anthropic SDK
+    # shape Claude and Codex both emit. This transport emitted a BARE
+    # `{"type": "assistant", "content": [...]}`, so the live path read an empty
+    # block list and every Grok tool call was dropped from the saved turn: a real
+    # session stored its reasoning and its answer, and not one tool row.
+    #
+    # It hid well. The REBUILD path (`transcript_reducer._content_blocks`) does
+    # accept both shapes, so a rebuild-based test reduces the bare form correctly —
+    # while the live path, which is what actually builds and persists the turn,
+    # silently dropped it.
+    #
+    # (The asymmetry itself is worth removing broker-side so no future transport
+    # can trip on it; that is a shared-code change and deliberately not made here,
+    # where the brief is Grok only.)
+
+    def _assistant_event(self, blocks: list[dict]) -> dict:
+        """An assistant frame in the shape the live broker path actually reads."""
+        return {
+            "type": "assistant",
+            "message": {"model": self._model, "content": blocks},
+            # Bare `content` kept alongside for readers that take the flat shape
+            # (the broker's artifact tracker does; belt and braces, costs nothing).
+            "content": blocks,
+        }
+
+    def _user_event(self, blocks: list[dict]) -> dict:
+        """A user frame — the role a tool_result must ride in (see the tool_call_update branch)."""
+        return {"type": "user", "message": {"content": blocks}, "content": blocks}
+
     def _map_acp_update(self, update: dict) -> dict | None:
         """Convert ACP session/update payloads into the event shapes other transports emit."""
         if not isinstance(update, dict):
@@ -704,7 +739,7 @@ class GrokACPTransport(CLITransport):
             block: dict = {"type": "tool_use", "name": normalized, "input": args}
             if call_id:
                 block["id"] = call_id
-            return {"type": "assistant", "content": [block]}
+            return self._assistant_event([block])
 
         # Tool progress / completion.
         #
@@ -749,7 +784,17 @@ class GrokACPTransport(CLITransport):
             block[TOOL_ENDED_AT] = _utc_now_iso()
             if open_call and open_call.get("started_at"):
                 block["started_at"] = open_call["started_at"]
-            return {"type": "assistant", "content": [block]}
+            # ROLE IS LOAD-BEARING: a tool_result rides in a **user** frame, not an assistant
+            # one. That is the Anthropic wire convention Claude and Codex both follow (the
+            # model emits the call, the harness answers it), and the whole stack is built on
+            # it: the transcript reducer only harvests tool_result blocks from `user` frames,
+            # and the broker has a dedicated `_is_tool_result_only_user_event` so such a frame
+            # does not become a visible user turn. Emitting these as `assistant` — as this
+            # transport did — meant the reducer silently dropped every one, so a Grok session
+            # stored its tool CALLS with no results: hierarchical mode showed the answer and
+            # never the tool rows. Unit tests passed throughout, because they asserted the
+            # block we built rather than the turn the reducer built from it.
+            return self._user_event([block])
 
         # Plan (forward for observability; UI may render or ignore)
         if su in ("plan", "plan_update"):

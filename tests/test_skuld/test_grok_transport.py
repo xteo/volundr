@@ -239,6 +239,82 @@ class TestGrokACPTransport:
                     results += sum(1 for b in out["content"] if b["type"] == "tool_result")
         assert (uses, results) == (4, 4)
 
+    def test_tool_result_rides_in_a_user_frame_not_an_assistant_one(self, tmp_path):
+        """Role is load-bearing: the reducer only harvests tool_result from `user` frames."""
+        t = GrokACPTransport(str(tmp_path))
+        t._map_acp_update(dict(self.REAL_TOOL_CALL))
+        ev = t._map_acp_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": self.REAL_TOOL_CALL["toolCallId"],
+                "status": "completed",
+                "rawOutput": "ok",
+            }
+        )
+        assert ev["type"] == "user", (
+            "a tool_result in an `assistant` frame is silently dropped by the transcript "
+            "reducer — the session then stores calls with no results"
+        )
+
+    def test_seam_transport_output_reduces_to_paired_transcript_parts(self, tmp_path):
+        """THE test that would have caught it: transport output -> the REAL reducer.
+
+        Every unit test above asserts the block this transport BUILDS. None of them
+        asserted the turn the reducer builds FROM it — which is the thing the app
+        renders. That gap is exactly how tool_result blocks shipped in the wrong role
+        with 25 green tests: correct block, wrong envelope, silently discarded.
+
+        So this drives the actual `reduce_frames` and asserts the durable parts.
+        """
+        from dataclasses import dataclass
+
+        from niuu.domain.transcript_reducer import TOOL_ENDED_AT, reduce_frames
+
+        @dataclass
+        class _Frame:
+            seq: int
+            kind: str
+            payload: dict
+            request_id: str | None = None
+            ts: str | None = "2026-08-15T11:00:00Z"
+            session_id: str | None = "s1"
+
+        t = GrokACPTransport(str(tmp_path))
+        frames, seq = [], 0
+        for i, (raw, label) in enumerate(
+            [("write", "Write"), ("run_terminal_command", "Run Command")]
+        ):
+            call = {
+                "sessionUpdate": "tool_call",
+                "toolCallId": f"call-{i}",
+                "title": raw,
+                "rawInput": {"file_path": f"/tmp/{i}.txt"},
+                "_meta": {"x.ai/tool": {"name": raw, "label": label}},
+            }
+            done = {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": f"call-{i}",
+                "status": "completed",
+                "rawOutput": {"ok": True},
+            }
+            for update in (call, done):
+                ev = t._map_acp_update(update)
+                if ev:
+                    seq += 1
+                    frames.append(_Frame(seq=seq, kind=ev.get("type", "unknown"), payload=ev))
+
+        parts = [p for turn in reduce_frames(frames).turns for p in (turn.get("parts") or [])]
+        uses = [p for p in parts if p.get("type") == "tool_use"]
+        results = [p for p in parts if p.get("type") == "tool_result"]
+
+        assert len(uses) == 2, f"expected 2 durable tool_use parts, got {len(uses)}"
+        assert len(results) == 2, f"expected 2 durable tool_result parts, got {len(results)}"
+        # Names normalized the cross-engine way, so hierarchical rows classify them.
+        assert {u["name"] for u in uses} == {"Write", "Bash"}
+        # Paired by id, and timed on both ends — what a row needs to say "ran in Xs".
+        assert {r["tool_use_id"] for r in results} == {u["id"] for u in uses}
+        assert all(u.get("started_at") and u.get(TOOL_ENDED_AT) for u in uses)
+
     def test_plan_update_survives_for_the_plan_dock(self, tmp_path):
         """Grok emits real ACP `plan` entries — the todo dock's data."""
         t = GrokACPTransport(str(tmp_path))
