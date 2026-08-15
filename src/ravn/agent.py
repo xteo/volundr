@@ -633,7 +633,7 @@ class RavnAgent:
                 episode.structured_outcome = parsed_outcome.fields
                 episode.outcome_valid = parsed_outcome.valid
 
-            if self._memory is not None:
+            if self._memory is not None and _is_worth_remembering(episode):
                 episode = await self._enrich_episode(
                     episode=episode,
                     turn_result=partial_result,
@@ -1543,6 +1543,33 @@ def _determine_outcome(tool_results: list[ToolResult]) -> Outcome:
     if errors:
         return Outcome.PARTIAL
     return Outcome.SUCCESS
+
+
+#: An answer this short is an acknowledgement, not a finding. Measured against the real corpus:
+#: the health-check answers were "ok" (2), "pong" (4) and "Hello!" (6); the shortest genuinely
+#: useful answer was 35 ("Yes — Travis, Thor's resident Ravn.").
+_TRIVIAL_ANSWER_MAX_CHARS = 12
+
+
+def _is_worth_remembering(episode: Episode) -> bool:
+    """Whether this turn is an episode at all, rather than a ping.
+
+    Memory is a corpus you search, not a log you append to: every document competes with every
+    other for the same few recall slots. 100 of 139 documents in the live store were health
+    checks — 70 "Hello!", 23 "Hello, Ravn!", 7 "pong" — and they made recall degenerate, with two
+    unrelated queries returning the same three rows. Each had also paid for a reflection-model
+    call on the way in.
+
+    The discriminator is the ANSWER, not the length of the exchange. A turn that used a tool did
+    something in the world and is kept whatever it said; a turn that errored is a fact about the
+    system, often the most useful kind. What remains is a turn where the agent answered from what
+    it already knew — and if that answer is a bare acknowledgement, it added nothing to the corpus
+    that was not in it already. Filtering on the exchange's total length would instead have
+    dropped a real question that happened to get a short reply.
+    """
+    if episode.tools_used or episode.errors:
+        return True
+    return len(episode.summary.strip()) > _TRIVIAL_ANSWER_MAX_CHARS
 
 
 def _extract_episode(
