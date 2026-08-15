@@ -213,7 +213,17 @@ def build_member_config(
     if not autonomous:
         overlay = _deep_merge(_quiet_overlay(), overlay)
     if memory_db_path is not None:
-        overlay["memory"] = {"backend": "sqlite", "sqlite": {"path": str(memory_db_path)}}
+        # BOTH keys, and `path` is the one that actually decides. The sqlite backend is built from
+        # `settings.memory.path` (`runtime_builders.py`), not from `memory.sqlite.path`, so setting
+        # only the latter left every member inheriting the operator's `~/.ravn/memory.db` from the
+        # base config — the per-member file was never created and Neo's episodes were written into
+        # Travis's memory, where nothing distinguishes them. Two agents sharing one memory are one
+        # agent with two voices, which is the opposite of the point of a room.
+        overlay["memory"] = {
+            "backend": "sqlite",
+            "path": str(memory_db_path),
+            "sqlite": {"path": str(memory_db_path)},
+        }
     if queue_journal_path is not None:
         overlay["initiative"]["queue_journal_path"] = str(queue_journal_path)
 
