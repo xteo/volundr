@@ -358,7 +358,11 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
             display_name="OpenAI Codex",
             description="OpenAI Codex — WebSocket protocol with streaming and tools",
             labels=["session", "codex"],
-            default_model="",
+            # Sol is the default Codex model (Damien, 2026-08-15). It was empty, which
+            # left the choice entirely to whatever the caller happened to pass — the app
+            # always sends one, but a REST/tool launch that omitted it got no model at
+            # all. Verified working on live sessions today.
+            default_model="gpt-5.6-sol",
             compatible_providers=["openai"],
             defaults={
                 "broker": {
@@ -375,7 +379,7 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
                 "OpenAI Codex — subprocess transport tuned for autonomous workflow execution"
             ),
             labels=["session", "codex", "batch"],
-            default_model="",
+            default_model="gpt-5.6-sol",
             compatible_providers=["openai"],
             defaults={
                 "broker": {
