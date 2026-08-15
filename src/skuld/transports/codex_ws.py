@@ -17,6 +17,7 @@ import os
 import shlex
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from niuu.adapters.cli.runtime import (
 from niuu.adapters.cli.runtime import (
     stop_subprocess as _stop_process,
 )
+from niuu.domain.transcript_reducer import TOOL_ENDED_AT
 from niuu.ports.cli import CLITransport, TransportCapabilities
 from skuld.transports.codex import (
     CodexSubprocessTransport,
@@ -1153,6 +1155,25 @@ class CodexWebSocketTransport(CLITransport):
         }
         if is_error:
             block["is_error"] = True
+        # D1 per-tool timing — the end stamp a hierarchical row reads for "ran in 3m 12s".
+        block[TOOL_ENDED_AT] = datetime.now(UTC).isoformat()
+
+        # DURABLE FIRST, browser second.
+        #
+        # This used to emit ONLY the content_block lifecycle below, which is a
+        # browser-facing stream: neither the transcript reducer nor the broker's live
+        # turn assembly consumes `content_block_start`. So a Codex session persisted
+        # its tool CALLS with no results at all — verified on a real session, which
+        # stored 2 tool_use parts, zero tool_result, and no per-tool end stamp. In
+        # hierarchical mode that is a tool row whose output never arrives.
+        #
+        # A tool_result belongs in a **user** frame carrying the `message` envelope:
+        # that is the Anthropic convention (model calls, harness answers), it is the
+        # only shape the reducer harvests results from, and the broker recognises such
+        # a frame via `_is_tool_result_only_user_event` so it never shows as a user
+        # turn. Same fault, same fix as the Grok transport.
+        await self._emit({"type": "user", "message": {"content": [block]}, "content": [block]})
+
         await self._emit_content_block_start(block)
         await self._emit_content_block_stop()
 
@@ -1246,9 +1267,13 @@ class CodexWebSocketTransport(CLITransport):
             if not isinstance(output, str):
                 output = str(output)
             exit_code = item.get("exitCode", 0)
-            if output or exit_code != 0:
-                prefix = "" if exit_code == 0 else f"[exit code {exit_code}] "
-                await self._emit_tool_result(item_id, prefix + output, is_error=exit_code != 0)
+            # ALWAYS emit a result for a finished call, even a silent success.
+            # Gating on `output or exit_code != 0` meant a command that succeeded with
+            # no stdout produced no tool_result at all — so the call never paired and
+            # never got its D1 end stamp, and a hierarchical row for a perfectly good
+            # `touch`/`mkdir` renders as a tool that never finished.
+            prefix = "" if exit_code == 0 else f"[exit code {exit_code}] "
+            await self._emit_tool_result(item_id, prefix + output, is_error=exit_code != 0)
             return
 
         if item_type == "agentMessage":
@@ -1266,9 +1291,12 @@ class CodexWebSocketTransport(CLITransport):
             result_text = self._extract_item_result_text(item)
             if not result_text:
                 result_text = self._consume_buffered_item_output(item_id)
-            if result_text:
-                is_error = bool(item.get("isError") or item.get("is_error"))
-                await self._emit_tool_result(item_id, result_text, is_error=is_error)
+            # Same rule as commandExecution: a completed item ALWAYS gets a result, so
+            # the call pairs and carries an end stamp. A successful file edit usually
+            # has no output text, which is exactly why Edit rows used to hang open —
+            # observed live: 3 tool_use parts, only 2 tool_result, the Edit unpaired.
+            is_error = bool(item.get("isError") or item.get("is_error"))
+            await self._emit_tool_result(item_id, result_text or "", is_error=is_error)
             return
 
         if item_type == "dynamicToolCall":

@@ -2381,7 +2381,19 @@ class TestItemCompletedEdgeCases:
         await t._handle_item_completed({"type": "fileChange", "id": "fc-1", "changes": []})
 
         stops = _events_of_type(emit, "content_block_stop")
-        assert len(stops) == 1
+        # 2 stops now: the tool_use block, plus the tool_result lifecycle every
+        # completed call emits. A completed tool ALWAYS produces a result — that is
+        # what pairs it and stamps its duration; silence left rows hanging open.
+        assert len(stops) == 2
+        # The durable half: a tool_result must ride in a `user` frame (the only shape
+        # the transcript reducer harvests results from).
+        user_results = [
+            e
+            for e in _emitted_events(emit)
+            if e.get("type") == "user"
+            and any(b.get("type") == "tool_result" for b in (e.get("content") or []))
+        ]
+        assert len(user_results) == 1
 
     @pytest.mark.asyncio
     async def test_web_search_completed_emits_stop(self, tmp_path):
@@ -2392,7 +2404,19 @@ class TestItemCompletedEdgeCases:
         await t._handle_item_completed({"type": "webSearch", "id": "ws-1", "query": "test"})
 
         stops = _events_of_type(emit, "content_block_stop")
-        assert len(stops) == 1
+        # 2 stops now: the tool_use block, plus the tool_result lifecycle every
+        # completed call emits. A completed tool ALWAYS produces a result — that is
+        # what pairs it and stamps its duration; silence left rows hanging open.
+        assert len(stops) == 2
+        # The durable half: a tool_result must ride in a `user` frame (the only shape
+        # the transcript reducer harvests results from).
+        user_results = [
+            e
+            for e in _emitted_events(emit)
+            if e.get("type") == "user"
+            and any(b.get("type") == "tool_result" for b in (e.get("content") or []))
+        ]
+        assert len(user_results) == 1
 
     @pytest.mark.asyncio
     async def test_mcp_tool_call_completed_emits_stop(self, tmp_path):
@@ -2403,7 +2427,19 @@ class TestItemCompletedEdgeCases:
         await t._handle_item_completed({"type": "mcpToolCall", "id": "mcp-1", "tool": "read_file"})
 
         stops = _events_of_type(emit, "content_block_stop")
-        assert len(stops) == 1
+        # 2 stops now: the tool_use block, plus the tool_result lifecycle every
+        # completed call emits. A completed tool ALWAYS produces a result — that is
+        # what pairs it and stamps its duration; silence left rows hanging open.
+        assert len(stops) == 2
+        # The durable half: a tool_result must ride in a `user` frame (the only shape
+        # the transcript reducer harvests results from).
+        user_results = [
+            e
+            for e in _emitted_events(emit)
+            if e.get("type") == "user"
+            and any(b.get("type") == "tool_result" for b in (e.get("content") or []))
+        ]
+        assert len(user_results) == 1
 
     @pytest.mark.asyncio
     async def test_command_completed_no_output_no_text_block(self, tmp_path):
@@ -2417,8 +2453,19 @@ class TestItemCompletedEdgeCases:
 
         events = _emitted_events(emit)
         stops = _events_of_type(emit, "content_block_stop")
-        # Only one stop (for the tool_use block), no text block started
-        assert len(stops) == 1
+        # 2 stops now: the tool_use block, plus the tool_result lifecycle every
+        # completed call emits. A completed tool ALWAYS produces a result — that is
+        # what pairs it and stamps its duration; silence left rows hanging open.
+        assert len(stops) == 2
+        # The durable half: a tool_result must ride in a `user` frame (the only shape
+        # the transcript reducer harvests results from).
+        user_results = [
+            e
+            for e in _emitted_events(emit)
+            if e.get("type") == "user"
+            and any(b.get("type") == "tool_result" for b in (e.get("content") or []))
+        ]
+        assert len(user_results) == 1
         # No text delta emitted
         text_deltas = [
             e
@@ -2440,7 +2487,19 @@ class TestItemCompletedEdgeCases:
 
         events = _emitted_events(emit)
         stops = _events_of_type(emit, "content_block_stop")
-        assert len(stops) == 1
+        # 2 stops now: the tool_use block, plus the tool_result lifecycle every
+        # completed call emits. A completed tool ALWAYS produces a result — that is
+        # what pairs it and stamps its duration; silence left rows hanging open.
+        assert len(stops) == 2
+        # The durable half: a tool_result must ride in a `user` frame (the only shape
+        # the transcript reducer harvests results from).
+        user_results = [
+            e
+            for e in _emitted_events(emit)
+            if e.get("type") == "user"
+            and any(b.get("type") == "tool_result" for b in (e.get("content") or []))
+        ]
+        assert len(user_results) == 1
         text_deltas = [
             e
             for e in events
