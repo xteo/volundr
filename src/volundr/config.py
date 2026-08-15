@@ -320,7 +320,7 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
             display_name="Claude Code",
             description="Anthropic Claude — full IDE with terminal, tools, and MCP",
             labels=["session", "claude"],
-            default_model="claude-opus-4-8",
+            default_model="claude-opus-5",
             compatible_providers=["anthropic"],
             defaults={
                 "broker": {
@@ -339,7 +339,7 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
                 "for subscription sessions, slash commands, and terminal controls"
             ),
             labels=["session", "claude", "interactive"],
-            default_model="claude-sonnet-4-6",
+            default_model="claude-opus-5",
             compatible_providers=["anthropic"],
             defaults={
                 "broker": {

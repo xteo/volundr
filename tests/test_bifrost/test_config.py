@@ -39,17 +39,27 @@ class TestBifrostConfig:
         cfg = BifrostConfig(aliases={"fast": "claude-haiku-4-5-20251001"})
         assert cfg.resolve_alias("gpt-4o") == "gpt-4o"
 
-    def test_grok_build_resolves_to_skuld_grok_definition(self):
-        # Regression: grok-build must be registered in the managed-model
+    def test_grok_models_resolve_to_skuld_grok_definition(self):
+        # Regression: every Grok model must be registered in the managed-model
         # catalog with session_definition=skuldGrok. Otherwise a forge session
         # created by model alone (no explicit definition) fails the catalog
         # lookup in ForgeService._resolve_session_definition and falls back to
         # the default skuldClaude definition — provisioning the Claude transport
         # for a Grok session, so no grok ACP worker ever spawns.
-        grok = next((m for m in BifrostConfig().models if m.id == "grok-build"), None)
-        assert grok is not None, "grok-build missing from default model catalog"
-        assert grok.session_definition == "skuldGrok"
-        assert grok.vendor == "xai"
+        #
+        # The ids are the ones `grok models` actually serves. This test used to
+        # name "grok-build", which the CLI has never served: it rejects the id
+        # outright, so every Grok session died at its first prompt while this
+        # test stayed green. Ids here must track the live catalogue.
+        models = BifrostConfig().models
+        for model_id in ("grok-4.6", "grok-4.5"):
+            grok = next((m for m in models if m.id == model_id), None)
+            assert grok is not None, f"{model_id} missing from default model catalog"
+            assert grok.session_definition == "skuldGrok"
+            assert grok.vendor == "xai"
+        assert not [m for m in models if m.id == "grok-build"], (
+            "grok-build is not a real model id and must not reappear in the catalogue"
+        )
 
     def test_provider_for_model_found(self):
         cfg = BifrostConfig(

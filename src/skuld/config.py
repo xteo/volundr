@@ -194,7 +194,7 @@ class SkuldSessionConfig(BaseModel):
 
     id: str = Field(default="unknown")
     name: str = Field(default="unknown")
-    model: str = Field(default="claude-opus-4-8")
+    model: str = Field(default="claude-opus-5")
     reasoning_effort: str = Field(
         default="",
         description=(
