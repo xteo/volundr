@@ -215,6 +215,30 @@ class SqliteMemoryAdapter(MemoryPort):
     async def initialize(self) -> None:
         """Create the database directory and tables if they do not exist."""
         await asyncio.to_thread(self._init_db)
+        await self._warn_if_unembedded()
+
+    async def _warn_if_unembedded(self) -> None:
+        """Say out loud how much of the corpus semantic search cannot see.
+
+        Hybrid search degrades to keyword-only for any document without a vector, and it does so
+        perfectly quietly: you still get results, they are simply the lexical ones. 96 of 137
+        documents accumulated that way over seven weeks — everything the resident learned before
+        embeddings were configured — and nothing ever said so. A number in the log at startup is
+        the difference between "recall feels vague" and a fact you can act on.
+        """
+        if self._embedding_port is None:
+            return
+        try:
+            pending = len(await self._search.unembedded(limit=10_000))
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never block startup
+            logger.debug("memory: could not count unembedded documents (%s)", exc)
+            return
+        if pending:
+            logger.warning(
+                "memory: %d document(s) have no embedding — semantic search cannot see them, "
+                "only keyword. Run `ravn memory-backfill-embeddings` to repair.",
+                pending,
+            )
 
     async def record_episode(self, episode: Episode) -> None:
         started = monotonic()
