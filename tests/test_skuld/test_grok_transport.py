@@ -57,7 +57,7 @@ class TestGrokACPTransport:
     def test_init_accepts_full_common_kwargs_for_parity(self, tmp_path):
         t = GrokACPTransport(
             str(tmp_path),
-            model="grok-4",
+            model="grok-4.5",
             session_id="sess-xyz",
             grok_bin="/custom/grok",
             skip_permissions=False,
@@ -66,7 +66,7 @@ class TestGrokACPTransport:
             initial_prompt="Start by exploring the repo.",
             acp_prompt_timeout_s=600.0,
         )
-        assert t._model == "grok-4"
+        assert t._model == "grok-4.5"  # a REAL id passes through untouched
         assert t._requested_session_id == "sess-xyz"
         assert t._grok_bin_override == "/custom/grok"
         assert t._system_prompt == "You are helpful."
@@ -333,6 +333,38 @@ class TestGrokACPTransport:
         )
         assert ev["content"][0]["type"] == "plan"
         assert len(ev["content"][0]["entries"]) == 2
+
+    def test_retired_model_ids_are_aliased_to_a_current_one(self, tmp_path):
+        """A client in the field keeps sending the id it shipped with.
+
+        `grok-build` is baked into every iOS build before 2227 and was never a real
+        `grok models` entry, so the CLI rejects it and the session dies at its first
+        prompt with nothing in the UI to explain why (live: `lexi-frontend-voice`,
+        2026-08-16 — 0 messages, never active). The server knows the catalogue and the
+        client cannot, so a retired id is upgraded rather than fatal.
+        """
+        assert GrokACPTransport(str(tmp_path), model="grok-build")._model == "grok-4.6"
+        assert GrokACPTransport(str(tmp_path), model="GROK-BUILD")._model == "grok-4.6"
+        assert GrokACPTransport(str(tmp_path), model="")._model == "grok-4.6"
+        # Real ids are never rewritten.
+        assert GrokACPTransport(str(tmp_path), model="grok-4.5")._model == "grok-4.5"
+        assert GrokACPTransport(str(tmp_path), model="grok-4.6")._model == "grok-4.6"
+
+    def test_start_is_idempotent_under_concurrency(self, tmp_path):
+        """Two concurrent start() calls must spawn ONE agent.
+
+        The old guard tested `self._process is not None` before awaiting the auth
+        preflight (up to 60 s) and only assigned `_process` after the spawn — so both
+        callers passed the check and both spawned. Two reader loops then raced the same
+        stdout: `readuntil() called while another coroutine is already waiting`, seen
+        live on `lexi-frontend-voice` with "Spawning Grok ACP agent" logged twice.
+        """
+        t = GrokACPTransport(str(tmp_path))
+        assert t._starting is False
+        t._starting = True  # first caller has entered start() and is awaiting preflight
+        # The second caller must bail immediately rather than spawn a rival agent.
+        asyncio.run(t.start())
+        assert t._process is None, "a concurrent start() spawned a second agent"
 
     def test_thought_chunk_maps_to_thinking_delta(self, tmp_path):
         # Reasoning must map to a thinking_delta (separate reasoning block), never an

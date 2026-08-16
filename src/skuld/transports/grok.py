@@ -51,6 +51,41 @@ _CHARS_PER_TOKEN = 4
 # its first prompt. Overridden per session via Skuld session.model.
 GROK_DEFAULT_MODEL = "grok-4.6"
 
+# Model ids clients may still be sending. A client is deployed separately from this
+# server — an iOS build in the field keeps sending whatever id it shipped with — so a
+# retired id must not kill the session. `grok-build` in particular was this project's
+# id for months and is baked into every app build before 2227; it was never a real
+# `grok models` entry, so the CLI rejects it and the session dies at its first prompt
+# with nothing in the UI to explain why (observed live: session `lexi-frontend-voice`,
+# 2026-08-16, message_count 0 and never active).
+#
+# Aliasing is the right shape for this: the server knows the current catalogue, the
+# client cannot, and silently upgrading a retired id is strictly better than failing.
+# Logged loudly so the skew is visible rather than papered over.
+_LEGACY_MODEL_ALIASES: dict[str, str] = {
+    "grok-build": GROK_DEFAULT_MODEL,
+    "grok-4": GROK_DEFAULT_MODEL,
+    "grok": GROK_DEFAULT_MODEL,
+    "": GROK_DEFAULT_MODEL,
+}
+
+
+def _resolve_model(model: str | None) -> str:
+    """Map a retired/blank model id onto a current one; pass real ids through."""
+    raw = (model or "").strip()
+    alias = _LEGACY_MODEL_ALIASES.get(raw.lower())
+    if alias:
+        if raw:
+            logger.warning(
+                "Grok model %r is retired — using %r instead. The caller is on an old "
+                "build; update it so the id it sends is real.",
+                raw,
+                alias,
+            )
+        return alias
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Tool name mapping — Grok internal IDs -> normalized names (for UI parity)
 # ---------------------------------------------------------------------------
@@ -154,7 +189,7 @@ class GrokACPTransport(CLITransport):
     ) -> None:
         super().__init__()
         self.workspace_dir = workspace_dir
-        self._model = model
+        self._model = _resolve_model(model)
         self._requested_session_id = session_id
         self._grok_bin_override = grok_bin
         self._skip_permissions = skip_permissions  # yolo via --always-approve; accepted for parity
@@ -165,6 +200,9 @@ class GrokACPTransport(CLITransport):
         self._auth_preflight_timeout = acp_auth_preflight_timeout_s
 
         self._process: asyncio.subprocess.Process | None = None
+        # Set synchronously at the top of start() so a concurrent start cannot
+        # slip past the guard while the auth preflight is awaited.
+        self._starting = False
         self._reader_task: asyncio.Task | None = None
         self._initial_dispatch_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize prompt turns
@@ -249,8 +287,19 @@ class GrokACPTransport(CLITransport):
             len(self._initial_prompt or ""),
         )
 
-        if self._process is not None:
+        # START-ONCE. The old guard was `if self._process is not None` — a check-then-act
+        # across an await: `_preflight_auth` below can take up to 60 s, and `_process` is
+        # only assigned after the spawn, so two concurrent start() calls both passed the
+        # check, both waited out the preflight, and both spawned an agent. Two reader
+        # loops then raced the same stdout, which is the
+        # `readuntil() called while another coroutine is already waiting` RuntimeError
+        # seen live (session `lexi-frontend-voice`, 2026-08-16 — "configured" and
+        # "Spawning Grok ACP agent" each logged twice). The flag is set BEFORE any await,
+        # so the second caller returns immediately.
+        if self._starting or self._process is not None:
+            logger.debug("GrokACPTransport.start() ignored — already starting/started")
             return
+        self._starting = True
 
         grok_bin = (
             self._grok_bin_override or os.environ.get("GROK_BIN") or shutil.which("grok") or "grok"
@@ -285,6 +334,8 @@ class GrokACPTransport(CLITransport):
         self._process = process
 
         if process.stdout is None or process.stdin is None:
+            # Failed start must be retryable, not wedged in "starting".
+            self._starting = False
             raise RuntimeError("Grok ACP stdio pipes not available")
 
         self._stdout_reader = process.stdout
@@ -321,6 +372,7 @@ class GrokACPTransport(CLITransport):
             if self._process:
                 await _stop_process(self._process)
             self._process = None
+            self._starting = False
             self._reader_task = None
             self._stdout_reader = None
             self._pending.clear()
