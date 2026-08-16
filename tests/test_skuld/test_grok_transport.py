@@ -315,6 +315,38 @@ class TestGrokACPTransport:
         assert {r["tool_use_id"] for r in results} == {u["id"] for u in uses}
         assert all(u.get("started_at") and u.get(TOOL_ENDED_AT) for u in uses)
 
+    @pytest.mark.asyncio
+    async def test_prompt_timeout_finalizes_the_turn(self, transport, tmp_path):
+        """A timeout must EMIT a result, or the session wedges forever.
+
+        The broker closes a turn only when a `result` event arrives. The old path
+        logged a warning and returned silently, so a turn whose tools never came back
+        stayed `in_progress` for good and every later message queued behind it —
+        exactly what happened to `lexi-frontend-voice` (2026-08-16): six parallel
+        Read/Grep calls at 19:03:28 that never returned, still wedged 2.5 h later.
+        """
+        events: list[dict] = []
+        transport.on_event(lambda ev: events.append(ev))
+        transport._prompt_timeout = 0.05  # trip it immediately
+        transport._session_id = "sess-1"
+
+        writes: list[bytes] = []
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdin.write = writes.append
+        proc.stdin.drain = AsyncMock()
+        transport._process = proc
+
+        await transport.send_message("do something slow")
+
+        results = [e for e in events if e.get("type") == "result"]
+        assert results, "a timed-out turn emitted no result — the session would wedge"
+        assert "timeout" in json.dumps(results[-1]).lower()
+        # And the agent is told to abandon the turn rather than run on unheard.
+        assert any(b"session/cancel" in w for w in writes), "no cancel sent to the agent"
+        # State is clean, so the next message starts a fresh turn.
+        assert transport._current_prompt_id is None
+
     def test_plan_update_survives_for_the_plan_dock(self, tmp_path):
         """Grok emits real ACP `plan` entries — the todo dock's data."""
         t = GrokACPTransport(str(tmp_path))

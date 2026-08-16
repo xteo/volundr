@@ -541,6 +541,14 @@ class GrokACPTransport(CLITransport):
             error={"code": -32601, "message": f"client does not implement {method}"},
         )
 
+    async def _acp_notify(self, method: str, params: dict) -> None:
+        """Send a JSON-RPC NOTIFICATION (no id, no reply expected)."""
+        if self._process is None or self._process.stdin is None:
+            return
+        payload = {"jsonrpc": "2.0", "method": method, "params": params}
+        self._process.stdin.write((json.dumps(payload) + "\n").encode())
+        await self._process.stdin.drain()
+
     async def _acp_respond(
         self, req_id: Any, *, result: dict | None = None, error: dict | None = None
     ) -> None:
@@ -666,9 +674,42 @@ class GrokACPTransport(CLITransport):
             if self._early_results.pop(req_id, None) is None:
                 await asyncio.wait_for(asyncio.shield(fut), timeout=self._prompt_timeout)
         except TimeoutError:
+            # A TIMEOUT MUST STILL END THE TURN.
+            #
+            # This used to log and return, emitting nothing. The broker only closes a
+            # turn when a `result` event arrives, so the turn stayed `in_progress`
+            # FOREVER: the UI showed a permanently working session and every later
+            # message queued behind a turn that could never finish. Seen live on
+            # `lexi-frontend-voice` (2026-08-16) — Grok fired six parallel Read/Grep
+            # calls at 19:03:28, none ever returned, and the session was still wedged
+            # two and a half hours later with the user's next messages stuck behind it.
+            #
+            # Whatever the agent did, the client's contract is the same: end the turn,
+            # say why, and hand control back. Anything else strands the session.
             logger.warning(
-                "Grok ACP prompt did not complete within timeout (%.1fs)", self._prompt_timeout
+                "Grok ACP prompt did not complete within timeout (%.1fs) — cancelling the "
+                "turn and finalizing so the session does not wedge",
+                self._prompt_timeout,
             )
+            # Best-effort: tell the agent to abandon the turn, so it is not left running
+            # tools against a client that has stopped waiting.
+            try:
+                await self._acp_notify("session/cancel", {"sessionId": self._session_id})
+            except Exception as exc:  # pragma: no cover - notify is advisory
+                logger.debug("Grok ACP cancel after timeout failed: %r", exc)
+            timeout_result = self._make_result_from_acp(
+                {
+                    "stopReason": "timeout",
+                    "sessionId": self._session_id,
+                    "error": (
+                        f"The model stopped responding for {self._prompt_timeout:.0f}s and the "
+                        "turn was cancelled. Any tool calls still shown without a result never "
+                        "completed. Send another message to continue."
+                    ),
+                }
+            )
+            self._last_result = timeout_result
+            await self._emit(timeout_result)
         except Exception:
             # Interrupted (e.g. by a steer). The reader already streamed what it
             # had; return so the turn loop can issue the queued follow-up.
