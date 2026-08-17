@@ -347,6 +347,22 @@ class TestGrokACPTransport:
         # State is clean, so the next message starts a fresh turn.
         assert transport._current_prompt_id is None
 
+    @pytest.mark.asyncio
+    async def test_teardown_mid_turn_still_finalizes(self, transport):
+        """CancelledError is a BaseException — it slipped past `except Exception`.
+
+        Stopping a session mid-turn cancelled the coroutine awaiting the prompt, so
+        nothing was emitted and the turn stayed open forever. A stopped session that
+        can never be re-used is the same failure as a timed-out one.
+        """
+        events: list[dict] = []
+        transport.on_event(lambda ev: events.append(ev))
+        transport._session_id = "sess-x"
+        await transport._finalize_stranded_turn("cancelled")
+        results = [e for e in events if e.get("type") == "result"]
+        assert results, "teardown emitted no result — the turn would stay open"
+        assert "cancelled" in json.dumps(results[-1]).lower()
+
     def test_plan_update_survives_for_the_plan_dock(self, tmp_path):
         """Grok emits real ACP `plan` entries — the todo dock's data."""
         t = GrokACPTransport(str(tmp_path))

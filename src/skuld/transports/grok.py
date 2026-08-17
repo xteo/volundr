@@ -541,6 +541,43 @@ class GrokACPTransport(CLITransport):
             error={"code": -32601, "message": f"client does not implement {method}"},
         )
 
+    async def _finalize_stranded_turn(self, reason: str, detail: str = "") -> None:
+        """Emit a terminal result so a turn can never be left open.
+
+        THE INVARIANT: a prompt that stops being awaited MUST produce a result. The
+        broker closes a turn only on a `result` event, so any path that abandons the
+        wait without emitting one strands the session — it shows as permanently
+        working and every later message queues behind a turn that can never finish.
+        `lexi-frontend-voice` sat like that for 2.5 h, then again for 11 h.
+
+        Timeout was fixed first; this covers the rest — transport teardown mid-turn
+        (CancelledError, which is a BaseException and so slipped past `except
+        Exception` entirely) and any unexpected failure with no steer queued.
+        """
+        message = {
+            "timeout": (
+                f"The model stopped responding for {self._prompt_timeout:.0f}s and the turn was "
+                "cancelled. Any tool calls shown without a result never completed. "
+                "Send another message to continue."
+            ),
+            "cancelled": (
+                "The session was stopped while this turn was running, so it was ended. "
+                "Any tool calls shown without a result never completed."
+            ),
+            "error": (
+                "The turn ended unexpectedly and was closed so the session stays usable."
+                + (f" ({detail})" if detail else "")
+            ),
+        }.get(reason, "The turn was ended.")
+        result = self._make_result_from_acp(
+            {"stopReason": reason, "sessionId": self._session_id, "error": message}
+        )
+        self._last_result = result
+        try:
+            await self._emit(result)
+        except Exception as exc:  # pragma: no cover - teardown races
+            logger.debug("Grok ACP could not emit the %s result: %r", reason, exc)
+
     async def _acp_notify(self, method: str, params: dict) -> None:
         """Send a JSON-RPC NOTIFICATION (no id, no reply expected)."""
         if self._process is None or self._process.stdin is None:
@@ -710,10 +747,23 @@ class GrokACPTransport(CLITransport):
             )
             self._last_result = timeout_result
             await self._emit(timeout_result)
-        except Exception:
-            # Interrupted (e.g. by a steer). The reader already streamed what it
-            # had; return so the turn loop can issue the queued follow-up.
-            logger.info("Grok ACP prompt ended early (interrupted)")
+        except asyncio.CancelledError:
+            # The transport was torn down mid-turn (session stop/restart, broker
+            # shutdown). CancelledError is a BaseException, so it never reached the
+            # handler below — the coroutine simply vanished and the turn was left
+            # open forever, exactly like the timeout case. Close it before re-raising.
+            await self._finalize_stranded_turn("cancelled")
+            raise
+        except Exception as exc:
+            if self._pending_steers:
+                # Interrupted BY A STEER — legitimate. The reader already streamed
+                # what it had and the turn loop issues the queued follow-up, so the
+                # turn continues and must NOT be closed here.
+                logger.info("Grok ACP prompt ended early (interrupted by steer)")
+            else:
+                # Ended early with nothing queued: the turn has no other way to end.
+                logger.warning("Grok ACP prompt failed (%r) — finalizing the turn", exc)
+                await self._finalize_stranded_turn("error", detail=repr(exc))
         finally:
             self._pending.pop(req_id, None)
             self._current_prompt_id = None
