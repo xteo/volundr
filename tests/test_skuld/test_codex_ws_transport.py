@@ -3066,7 +3066,7 @@ class TestSteeringCorrelation:
 
 
 # ---------------------------------------------------------------------------
-# Reasoning effort (GPT-5.6 Sol Ultra)
+# Reasoning effort (GPT-6 Astra / GPT-5.6 Sol Ultra)
 # ---------------------------------------------------------------------------
 
 
@@ -3100,8 +3100,19 @@ class TestReasoningEffort:
         assert _codex_effort_for_model("gpt-5.5") == "high"
         assert _codex_effort_for_model("") == "high"
 
+    def test_effort_helpers_recognize_astra(self) -> None:
+        # GPT-6 Astra's bundled Codex metadata lists low/medium/high/xhigh/max/ultra;
+        # it launches at `ultra` exactly like Sol.
+        assert _model_supports_ultra("gpt-6-astra") is True
+        assert _model_supports_ultra("GPT-6-Astra") is True
+        assert _codex_effort_for_model("gpt-6-astra") == "ultra"
+
     def test_sol_defaults_to_ultra(self, tmp_path) -> None:
         t = _make_transport(tmp_path, model="gpt-5.6-sol")
+        assert t._reasoning_effort == "ultra"
+
+    def test_astra_defaults_to_ultra(self, tmp_path) -> None:
+        t = _make_transport(tmp_path, model="gpt-6-astra")
         assert t._reasoning_effort == "ultra"
 
     def test_non_sol_defaults_to_high(self, tmp_path) -> None:
@@ -3115,6 +3126,18 @@ class TestReasoningEffort:
     @pytest.mark.asyncio
     async def test_sol_handshake_sends_ultra_effort(self, tmp_path) -> None:
         t = _make_transport(tmp_path, model="gpt-5.6-sol")
+        params = await _capture_thread_start_params(t)
+        assert params["modelReasoningEffort"] == "ultra"
+
+    @pytest.mark.asyncio
+    async def test_astra_handshake_sends_ultra_effort(self, tmp_path) -> None:
+        t = _make_transport(tmp_path, model="gpt-6-astra")
+        params = await _capture_thread_start_params(t)
+        assert params["modelReasoningEffort"] == "ultra"
+
+    @pytest.mark.asyncio
+    async def test_astra_explicit_ultra_not_clamped(self, tmp_path) -> None:
+        t = _make_transport(tmp_path, model="gpt-6-astra", reasoning_effort="ultra")
         params = await _capture_thread_start_params(t)
         assert params["modelReasoningEffort"] == "ultra"
 

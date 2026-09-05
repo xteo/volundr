@@ -39,6 +39,31 @@ class TestBifrostConfig:
         cfg = BifrostConfig(aliases={"fast": "claude-haiku-4-5-20251001"})
         assert cfg.resolve_alias("gpt-4o") == "gpt-4o"
 
+    def test_codex_catalog_is_astra_and_sol_only(self):
+        # Astra + Sol are the only two Codex choices, Astra the default (Damien,
+        # 2026-09-05). Terra was removed with the same decision.
+        from bifrost.config import _default_models
+        from niuu.domain.model_catalog import ManagedModelTier
+
+        models = _default_models()
+        astra = next((m for m in models if m.id == "gpt-6-astra"), None)
+        assert astra is not None, "gpt-6-astra missing from default model catalog"
+        assert astra.name == "GPT-6 Astra"
+        assert astra.vendor == "openai"
+        assert astra.session_definition == "skuldCodex"
+        assert astra.tier == ManagedModelTier.FRONTIER
+        assert astra.supports_tools and astra.supports_thinking
+        sol = next((m for m in models if m.id == "gpt-5.6-sol"), None)
+        assert sol is not None, "gpt-5.6-sol must stay in the catalogue"
+        assert sol.session_definition == "skuldCodex"
+        openai_ids = [m.id for m in models if m.vendor == "openai"]
+        assert openai_ids == ["gpt-6-astra", "gpt-5.6-sol"], (
+            f"Codex catalogue must be exactly Astra then Sol, got {openai_ids}"
+        )
+        assert not [m for m in models if m.id == "gpt-5.6-terra"], (
+            "gpt-5.6-terra was removed (Astra + Sol only) and must not reappear"
+        )
+
     def test_grok_models_resolve_to_skuld_grok_definition(self):
         # Regression: every Grok model must be registered in the managed-model
         # catalog with session_definition=skuldGrok. Otherwise a forge session

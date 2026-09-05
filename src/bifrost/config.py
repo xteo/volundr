@@ -165,33 +165,39 @@ def _default_models() -> list[ManagedModelConfig]:
             supports_tools=True,
             supports_thinking=True,
         ),
+        # Astra + Sol are the only two Codex choices, Astra the default (Damien,
+        # 2026-09-05). Terra was removed with the same decision.
+        ManagedModelConfig(
+            id="gpt-6-astra",
+            name="GPT-6 Astra",
+            vendor="openai",
+            provider=ManagedModelProvider.CLOUD,
+            tier=ManagedModelTier.FRONTIER,
+            color="#059669",
+            description=(
+                "OpenAI GPT-6 Astra — the GPT-6 flagship for the hardest end-to-end "
+                "coding, computer-use and research work; 1M-token context; defaults "
+                "to Ultra reasoning"
+            ),
+            # GPT-6 Astra is $10 in / $50 out per 1M tokens; use the output rate.
+            cost_per_million_tokens=50.0,
+            session_definition="skuldCodex",
+            supports_tools=True,
+            supports_thinking=True,
+        ),
         ManagedModelConfig(
             id="gpt-5.6-sol",
             name="GPT-5.6 Sol",
             vendor="openai",
             provider=ManagedModelProvider.CLOUD,
             tier=ManagedModelTier.FRONTIER,
-            color="#059669",
+            color="#10B981",
             description=(
                 "OpenAI GPT-5.6 Sol flagship coding model; defaults to the new "
                 "Ultra reasoning effort."
             ),
             # GPT-5.6 Sol is $5 in / $30 out per 1M tokens; use the output rate.
             cost_per_million_tokens=30.0,
-            session_definition="skuldCodex",
-            supports_tools=True,
-            supports_thinking=True,
-        ),
-        ManagedModelConfig(
-            id="gpt-5.6-terra",
-            name="GPT-5.6 Terra",
-            vendor="openai",
-            provider=ManagedModelProvider.CLOUD,
-            tier=ManagedModelTier.BALANCED,
-            color="#14B8A6",
-            description="OpenAI GPT-5.6 Terra — strong lower-cost coding model.",
-            # GPT-5.6 Terra is $2.50 in / $15 out per 1M tokens; use the output rate.
-            cost_per_million_tokens=15.0,
             session_definition="skuldCodex",
             supports_tools=True,
             supports_thinking=True,
