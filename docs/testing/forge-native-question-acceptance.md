@@ -86,10 +86,11 @@ completion uses the matching native result's descendant interruption and
 |---|---|
 | Single-select normal option | Its digit selects immediately; with multiple questions it advances to the next page |
 | Other row | Its digit opens the inline editor; the `ctrl+g to edit in Vim` hint appears |
-| Other editor | Literal bracketed paste displays the text; one Enter submits that editor |
+| Single-select Other editor | Literal bracketed paste displays the text; one Enter submits that editor |
 | Multiple-question last answer | Advances to Review your answers; the numbered Submit answers action is separate |
 | Checkbox question | Digits toggle choices without advancing or moving the focused row |
 | Checkbox row focused | Enter toggles that row; it is not a submit action |
+| Checkbox Other editor | Navigate focus to Other, then paste; typing automatically checks the custom row. Do not press Enter there, because it deselects that row |
 | Checkbox completion | Navigate to the unnumbered highlighted Submit row, Enter to reach review, then choose Submit answers |
 
 The former sequence digit → Enter → paste → Enter could cancel Other by

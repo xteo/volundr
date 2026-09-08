@@ -50,6 +50,14 @@ CHECKBOX = [
         "multiSelect": True,
     }
 ]
+MIXED = [
+    {
+        "header": "Features",
+        "question": "Which features?",
+        "options": [{"label": "Auth first"}, {"label": "Search second"}],
+        "multiSelect": True,
+    }
+]
 
 
 def screen(name):
@@ -707,3 +715,86 @@ async def test_other_transaction_excludes_concurrent_message_and_terminal_writer
     assert isinstance(result[0], AssertionError)  # Harness rejects unplanned recovery key.
     assert transport.loaded_buffers == ["Copper-transition café 東京"]
     assert not receipts(events)
+
+
+async def test_checkbox_other_focus_and_paste_never_send_toggle_enter(native_bridge):
+    transport, events = native_bridge
+    transport.capture_stdout = screen("mixed-00-initial")
+    rid = await transport.surface(MIXED)
+    transport.steps.extend(
+        [
+            ("1", screen("mixed-01-auth")),
+            ("Down", screen("mixed-02-down-search")),
+            ("Down", screen("mixed-03-down-other")),
+            ("paste", screen("mixed-04-paste")),
+            ("Down", screen("mixed-07-down-submit")),
+            ("Enter", screen("mixed-08-review")),
+            ("1", "❯\n"),
+        ]
+    )
+    text = "Copper focus café 東京"
+    transport.consumed = {"answers": {"Which features?": "Auth first, " + text}}
+    await transport.send_control(
+        "ask_user_answer",
+        request_id=rid,
+        answers=[{"answer": ["Auth first", text], "free_text": text, "option_indexes": [0]}],
+    )
+    assert _send_keys(transport) == ["1", "Down", "Down", "Down", "Enter", "1"]
+    assert transport.loaded_buffers == [text]
+    assert len(receipts(events)) == 1 and receipts(events)[0]["accepted"] is True
+    assert len(tool_results(events)) == 1
+
+
+async def test_checkbox_other_waits_for_actual_focus_before_paste(native_bridge):
+    transport, events = native_bridge
+    transport.capture_stdout = screen("mixed-00-initial")
+    rid = await transport.surface(MIXED)
+    transport.steps.extend([("1", screen("mixed-01-auth")), ("Down", screen("mixed-01-auth"))])
+    with pytest.raises(ControlRecoveryError):
+        await transport.send_control(
+            "ask_user_answer",
+            request_id=rid,
+            answers=[
+                {"answer": ["Auth first", "Copper"], "free_text": "Copper", "option_indexes": [0]}
+            ],
+        )
+    assert _send_keys(transport) == ["1", "Down"]
+    assert not transport.loaded_buffers and not receipts(events)
+
+
+async def test_checkbox_unchecked_custom_text_is_never_submitted(native_bridge):
+    transport, events = native_bridge
+    transport.capture_stdout = screen("mixed-00-initial")
+    rid = await transport.surface(MIXED)
+    transport.steps.extend(
+        [
+            ("1", screen("mixed-01-auth")),
+            ("Down", screen("mixed-02-down-search")),
+            ("Down", screen("mixed-03-down-other")),
+            ("paste", screen("mixed-05-enter-text")),
+        ]
+    )
+    text = "Copper focus café 東京"
+    with pytest.raises(ControlRecoveryError):
+        await transport.send_control(
+            "ask_user_answer",
+            request_id=rid,
+            answers=[{"answer": ["Auth first", text], "free_text": text, "option_indexes": [0]}],
+        )
+    assert _send_keys(transport) == ["1", "Down", "Down"]
+    assert transport.loaded_buffers == [text] and not receipts(events)
+
+
+async def test_checkbox_unknown_focus_is_rejected_without_typing(native_bridge):
+    transport, events = native_bridge
+    transport.capture_stdout = screen("mixed-01-auth").replace("❯", " ")
+    rid = await transport.surface(MIXED)
+    with pytest.raises(ControlRecoveryError):
+        await transport.send_control(
+            "ask_user_answer",
+            request_id=rid,
+            answers=[
+                {"answer": ["Auth first", "Copper"], "free_text": "Copper", "option_indexes": [0]}
+            ],
+        )
+    assert not _send_keys(transport) and not transport.loaded_buffers and not receipts(events)

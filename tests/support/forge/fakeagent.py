@@ -356,8 +356,9 @@ def _question_widget(header: str, question: str, options: list[str], *, multi: b
     """Consume the observed native menu protocol, without consulting the answer request.
 
     Single-choice digits advance immediately. Checkbox digits only toggle;
-    Enter on a checkbox toggles it too. Submission requires focus on the
-    unnumbered Submit row followed by the separate final-review digit.
+    Enter on a checkbox toggles it too. Focusing Other opens its editor; typing
+    selects that text immediately. Submission requires focus on the unnumbered
+    Submit row followed by the separate final-review digit.
     """
     focus = 0
     selected: list[str] = []
@@ -420,27 +421,32 @@ def _question_widget(header: str, question: str, options: list[str], *, multi: b
             continue
         if editing and key not in {"\x1b[A", "\x1b[B"}:
             if key in {"\r", "\n"}:
-                if not custom:
-                    return "cancelled"
-                if not multi:
-                    return custom
-                toggle(custom)
-                editing = False
-            elif key in {"\x7f", "\b"}:
-                custom = custom[:-1]
+                if multi:
+                    toggle(custom or "Type something")
+                else:
+                    return custom or "cancelled"
             else:
-                custom += key
+                previous = custom or "Type something"
+                custom = custom[:-1] if key in {"\x7f", "\b"} else custom + key
+                if multi:
+                    if previous in selected:
+                        selected.remove(previous)
+                    if custom:
+                        selected.append(custom)
             render()
             continue
         if key in {"\x1b[A", "\x1b[B"}:
             focus = (focus + (1 if key.endswith("B") else -1)) % (
                 len(options) + (2 if multi else 1)
             )
-            editing = False
+            editing = focus == len(options)
         elif key.isdigit() and 1 <= int(key) <= len(options) + 1:
             index = int(key) - 1
             if index == len(options):
-                focus, editing = index, True
+                if multi:
+                    toggle(custom or "Type something")
+                else:
+                    focus, editing = index, True
             elif multi:
                 toggle(options[index])
             else:

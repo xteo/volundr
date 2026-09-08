@@ -1,7 +1,8 @@
 # Forge reliability release — September 8, 2026
 
-Status: candidate `.1` deployed and live-tested; candidate `.2` closes issues found by that campaign.
-Release identity: `forge-2026.09.08.2`. Matching Lexi iOS/macOS build: 2237.
+Current source candidate: `forge-2026.09.08.4`, paired with Lexi iOS/macOS build 2239.
+The `.2`/2237 release is the historical distributed baseline below. The `.3` server is live;
+final `.4` native acceptance and 2239 distribution follow the gates described here.
 
 This release implements the accepted Astra endpoint findings and Claude Fable 5.1 xhigh
 review. Active-provider acceptance covers Claude tmux and Codex. Legacy Claude SDK/Scody
@@ -107,23 +108,71 @@ An established socket then exhausted another ten retries while loaded history an
 unsent draft remained visible. Foregrounding after connectivity returned opened a new socket,
 cleared the interruption notice and preserved both history and draft. The fault proxy changes
 displayed origin URLs for routing and does not prove byte-identical client text. Server-side
-byte comparisons are separate. These simulator results do not substitute for physical iPhone QA.
+byte comparisons are separate. The owner subsequently accepted simulator-only validation for this campaign; physical iPhone
+QA is optional and remains unexecuted.
 
 Build 2236 passed iOS and macOS archive/export/Apple validation without upload. The live outage
 capture then exposed a connection notice overlapping transcript text; build 2237 corrects its
 readability before upload. The 2236 tag and artifacts remain intact as an unshipped candidate.
 
-## Remaining acceptance
+## Follow-up from actual simulator acceptance
 
-1. Commit/tag and launch candidate `.2`; inspect all migration checksums and every
-   platform/broker revision, native ID and preserved history prefix.
-2. Repeat the affected native search, crash recovery and question fault checks on `.2`,
-   including native continuity, lazy output and PostgreSQL/replay comparison.
-3. Retain clean build screenshots and finish the remaining live fault evidence.
-4. Validate on a physical iPhone, including prolonged outage/background and memory behavior.
-   Both paired phones were unavailable during simulator validation; this remains explicit.
-5. Archive and validate both Apple targets, upload build 2237, and verify App Store Connect
-   processing and TestFlight availability. A passed test suite is not a completed release.
+Candidate `.2` was deployed with all five original native sessions and all 429,148 frozen raw
+rows preserved, and build 2237 reached internal TestFlight on both Apple platforms. A sixth user
+session, `lia-physics-review`, was created during the campaign and is included in the final
+preservation set. It has a separate native/cache backup and a frozen 1,780-row raw prefix. No
+retained user session is used for test prompts or injected faults.
+
+Actual live iOS testing discovered three question-card problems after the baseline release:
+translucent card backgrounds, collapsed restored Other editors, and drafts inherited by a new
+request. Build 2238 fixed the first two but remains unuploaded after reproducing the third.
+Build 2239 gives the state-owning card intrinsic request identity. Hosted production-card tests
+cover fresh-request isolation and same-request restoration; the new identity regression fails
+against the old 2238 card. The final focused simulator gate passes 60 tests without skips.
+
+The restored Other submission also exposed false native acceptance in `.2`: Forge acknowledged
+before Claude rejected an empty editor, and the required output file was absent. Candidate `.3`
+correlates the exact native tool result before success, serializes answer transactions, prevents
+ordinary input into pending controls, and preserves uncertainty when native proof is missing.
+It captures a failed native question result once and reconciles cancellation completion using
+correlated native interruption and turn-duration records. The clean `.3` source gate passed
+4,848 tests at 85.35% combined coverage and all 55 strict real-tmux tests.
+
+The clean `.3` live harness passed single-option, Unicode Other, multiple-question and checkbox
+answers. Mixed checkbox/Other correctly reported uncertainty but exposed a separate focus defect.
+Candidate `.4` navigates to the native custom row and preserves its automatic selection while
+submitting. Sanitized native transition fixtures and real PTY tests model digit shortcuts that
+do not move focus and Enter that deselects custom text. The first comprehensive `.4` gate passed
+4,852 unit tests and all 55 strict tmux tests. A final rerun includes the strengthened mixed PTY
+fixture. The unchanged 85% coverage gate and strict skip/xfail rejection remain required.
+
+The actual 2238 app on `.3` subsequently submitted `Copper-2238-fixed café 東京` successfully:
+matching native tool result preceded the positive receipt, and the expected file contains the
+exact 30 UTF-8 bytes. All 268 raw rows project to 245 identical public/replay frames. The separate
+cross-request draft failure is preserved and must pass on actual 2239 before distribution.
+
+The campaign also completed a 32m59s simulator soak with visible composer/photo drafts,
+four memory warnings and two network interruptions. A 20-turn concurrent Fable/Astra workload
+preserved all request identities and exact database/public/cursor/live replay parity. Strict
+fixtures passed Claude 10/10 and Codex 9/10 because one answer capitalized `Remembered`; separate
+semantic checks passed all 20. The strict failure remains recorded. Actual 2238 app viewing,
+scrolling, copying and returning from a 1,048,606-byte result passed with an exact clipboard hash.
+
+## Final release procedure
+
+Run the [native question acceptance workflow](forge-native-question-acceptance.md) against the
+committed `.4` identity, including all five rich positive cases and native cancellation. Validate
+actual 2239 sequential-question draft isolation and Unicode submission. Preserve original native
+IDs, caches, full conversation identities and every frozen raw prefix while upgrading all six
+retained brokers. Restore the normal systemd restart policy and health timer after verification.
+Archive and validate 2239 on iOS and macOS, then verify internal TestFlight processing and retain
+source/archive/evidence hashes. These steps are not replaced by a passed unit gate.
+
+Final execution and simulator evidence are recorded in the Lexi repository at
+`docs/forge/forge-hardening-simulator-acceptance-2026-09-08.md` and its release report. The owner
+accepted simulator-only testing; physical devices are not a release gate. Physical jetsam,
+thermal pressure, app force-quit persistence and the separately observed simulator voice/audio
+startup stall remain outside executed Forge acceptance.
 
 The working Thor Tailscale origin has a documented temporary DNS exception in the iOS
 source/changelog until `forge.xteo.mesh` and on-device resolution are provisioned together.

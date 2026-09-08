@@ -440,6 +440,98 @@ async def test_e4c_premature_other_enter_does_not_fake_success() -> None:
 # --------------------------------------------------------------------------- E5
 
 
+@pytest.mark.integration
+@pytest.mark.tmux
+@pytest.mark.asyncio
+async def test_e4d_mixed_checkbox_other_consumes_exact_native_answer() -> None:
+    """The actual iOS mixed shape follows the recorded native focus/paste/submit flow."""
+    _require_tmux()
+    async with BrokerHarness(hooks=True, idle_timeout_s=0.3) as h:
+        client = await h.connect()
+        client.send(
+            {"type": "message", "content": "ask_multi:Features|Which features?|Auth;Search"}
+        )
+        ask = await client.wait_for_type("ask_user_question", timeout=8.0)
+        page = _page(h)
+        await page.wait_for_text("3. [ ] Type something", timeout=5.0)
+        keys_before = len(_key_sends(client.frames))
+        text = "Copper focus café 東京"
+        client.ask_user_answer(
+            ask["request_id"],
+            [
+                {
+                    "question": "Which features?",
+                    "answer": ["Auth", text],
+                    "free_text": text,
+                    "option_indexes": [0],
+                }
+            ],
+        )
+        await client.wait_for(
+            lambda frames: any(
+                frame.get("request_id") == ask["request_id"] and frame.get("accepted") is True
+                for frame in _resolved_frames(frames)
+            ),
+            timeout=8.0,
+        )
+        assert _native_answers(client.frames, "Which features?") == [f"Auth, {text}"]
+        assert _key_sends(client.frames)[keys_before:] == [
+            "1",
+            "Down",
+            "Down",
+            "Down",
+            "Enter",
+            "1",
+        ]
+        assert (
+            len(
+                [
+                    frame
+                    for frame in _resolved_frames(client.frames)
+                    if frame.get("request_id") == ask["request_id"]
+                ]
+            )
+            == 1
+        )
+        assert ask["request_id"] not in h.broker._pending_ask_user_questions
+        await page.wait_for_text(f"chose: Auth, {text}", timeout=5.0)
+
+
+@pytest.mark.integration
+@pytest.mark.tmux
+@pytest.mark.asyncio
+async def test_e4e_mixed_native_digits_do_not_focus_and_enter_unchecks_text() -> None:
+    """Guard the two observed native traps independently of structured answer code."""
+    _require_tmux()
+    async with BrokerHarness(hooks=True, idle_timeout_s=0.3) as h:
+        client = await h.connect()
+        client.send(
+            {"type": "message", "content": "ask_multi:Features|Which features?|Auth;Search"}
+        )
+        ask = await client.wait_for_type("ask_user_question", timeout=8.0)
+        page = _page(h)
+        await page.wait_for_text("3. [ ] Type something", timeout=5.0)
+        await page.press("1")
+        await page.press("3")
+        snapshot = await page.wait_for_text("3. [✔] Type something", timeout=5.0)
+        assert "❯ 1. [✔] Auth" in snapshot and "ctrl+g to edit" not in snapshot
+        await page.press("Down")
+        await page.press("Down")
+        await page.wait_for_text("❯ 3. [✔] Type something", timeout=5.0)
+        text = "Copper focus café 東京"
+        # Literal paste without the page helper's automatic Enter.
+        await h.transport.send_control("terminal_input", text=text, enter=False)
+        await page.wait_for_text(f"❯ 3. [✔] {text}", timeout=5.0)
+        await page.press("Enter")
+        snapshot = await page.wait_for_text(f"❯ 3. [ ] {text}", timeout=5.0)
+        assert "Review your answers" not in snapshot
+        assert _native_answers(client.frames, "Which features?") == []
+        assert not any(
+            frame.get("request_id") == ask["request_id"] and frame.get("accepted") is True
+            for frame in _resolved_frames(client.frames)
+        )
+
+
 def _key_sends(frames: list[dict]) -> list[str]:
     return [f.get("key") for f in frames if f.get("type") == "terminal_key_sent"]
 

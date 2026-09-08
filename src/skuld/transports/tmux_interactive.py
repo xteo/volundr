@@ -2175,9 +2175,10 @@ class TmuxInteractiveTransport(CLITransport):
         )
         await self._paste_text(plan["custom"], enter=False, pane_id=pane_id)
         await self._wait_question_screen(lambda s: editor(s, plan["custom"]), pane_id=pane_id)
-        # In native Claude this Enter commits the populated editor. An Enter
-        # before the paste rejects the entire question instead.
-        await self._send_key("Enter", pane_id=pane_id)
+        # Single-select commits its populated editor with Enter. Checkbox text
+        # is selected as it is typed; Enter there would toggle that answer OFF.
+        if not plan["multi"]:
+            await self._send_key("Enter", pane_id=pane_id)
 
     @staticmethod
     def _checkbox_values(screen: str) -> dict[str, tuple[int, bool]]:
@@ -2208,7 +2209,7 @@ class TmuxInteractiveTransport(CLITransport):
             digit = self._checkbox_values(screen).get("Type something", (None, False))[0]
             if digit is None:
                 raise ValueError("The native checkbox menu has no custom answer row")
-            await self._send_key(str(digit), pane_id=pane_id)
+            await self._focus_checkbox_other(plan, digit, screen, pane_id=pane_id)
             await self._enter_question_text(plan, digit, pane_id=pane_id)
         # Digit shortcuts toggle boxes without moving focus. Enter toggles the
         # focused box; it submits only after the unnumbered Submit gains focus.
@@ -2235,6 +2236,26 @@ class TmuxInteractiveTransport(CLITransport):
                 pane_id=pane_id,
             )
         raise ValueError("The native checkbox Submit control was not reached")
+
+    async def _focus_checkbox_other(
+        self, plan: dict[str, Any], digit: int, screen: str, *, pane_id: str | None
+    ) -> None:
+        # Checkbox digit shortcuts only toggle selection; they do not focus the
+        # text editor. Navigate one observed focus change at a time instead.
+        for _ in range(len(self._menu_rows(screen)) + 1):
+            if any(re.match(rf"^\s*❯\s+{digit}\.\s+", line) for line in screen.splitlines()):
+                return
+            focus = next(
+                (line for line in screen.splitlines() if line.lstrip().startswith("❯")), None
+            )
+            if focus is None:
+                raise ValueError("The native checkbox focus is unknown")
+            await self._send_key("Down", pane_id=pane_id)
+            screen = await self._wait_question_screen(
+                lambda s: self._question_page_matches(s, plan) and focus not in s.splitlines(),
+                pane_id=pane_id,
+            )
+        raise ValueError("The native checkbox custom editor was not reached")
 
     async def _wait_native_question_result(self, pending: dict[str, Any]) -> dict[str, Any]:
         deadline = time.monotonic() + max(self._question_result_wait_s, 0.0)
