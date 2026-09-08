@@ -16,8 +16,10 @@ import logging
 import os
 import shlex
 import shutil
+import sys
 import tempfile
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -42,6 +44,7 @@ from skuld.transports.codex import (
     resolve_codex_cli,
 )
 from skuld.transports.mcp_config import build_codex_mcp_overrides
+from skuld.transports.owned_codex_process import OwnedCodexProcess, OwnedProcessError
 from skuld.transports.tool_shims import ensure_codex_tool_shims
 
 logger = logging.getLogger("skuld.transport")
@@ -208,6 +211,7 @@ class CodexWebSocketTransport(CLITransport):
         mcp_servers: list[dict] | None = None,
         resume_session_id: str = "",
         reasoning_effort: str = "",
+        session_id: str = "",
         **_kwargs: object,
     ) -> None:
         super().__init__()
@@ -228,6 +232,15 @@ class CodexWebSocketTransport(CLITransport):
         self._mcp_overrides = build_codex_mcp_overrides(self._mcp_servers)
         self._resume_session_id = (resume_session_id or "").strip() or None
         self._env = dict(os.environ)
+        self._process_owner = (
+            OwnedCodexProcess(
+                session_id,
+                workspace_dir,
+                Path(self._env.get("SKULD__PERSISTENCE_MOUNT_PATH") or Path.home() / ".niuu"),
+            )
+            if sys.platform == "linux" and session_id
+            else None
+        )
 
         self._process: asyncio.subprocess.Process | None = None
         self._ws: ClientConnection | None = None
@@ -348,6 +361,10 @@ class CodexWebSocketTransport(CLITransport):
             await self._spawn_app_server()
             await self._connect_ws()
             await self._handshake()
+        except OwnedProcessError:
+            await self.stop()
+            # A competing or unverifiable writer must never trigger a fresh-thread fallback.
+            raise
         except Exception as exc:
             # The subprocess adapter cannot resume app-server history. Falling
             # back here would silently replace the user's conversation.
@@ -388,9 +405,14 @@ class CodexWebSocketTransport(CLITransport):
                 logger.debug("Error closing Codex WS: %r", exc)
             self._ws = None
 
-        if self._process:
-            await _stop_process(self._process)
-            self._process = None
+        try:
+            if self._process:
+                with suppress(ProcessLookupError):
+                    await _stop_process(self._process)
+                self._process = None
+        finally:
+            if self._process_owner:
+                self._process_owner.release()
 
         if self._codex_socket_dir:
             shutil.rmtree(self._codex_socket_dir, ignore_errors=True)
@@ -433,6 +455,8 @@ class CodexWebSocketTransport(CLITransport):
     # ------------------------------------------------------------------
 
     async def _spawn_app_server(self) -> None:
+        if self._process_owner:
+            await self._process_owner.acquire()
         if self._codex_socket_dir:
             shutil.rmtree(self._codex_socket_dir, ignore_errors=True)
         self._codex_socket_dir = tempfile.mkdtemp(prefix="skuld-codex-")
@@ -468,13 +492,16 @@ class CodexWebSocketTransport(CLITransport):
             listen_url,
             env.get("CODEX_HOME", ""),
         )
+        spawn_cmd = self._process_owner.spawn_command(cmd, env) if self._process_owner else cmd
         self._process = await asyncio.create_subprocess_exec(
-            *cmd,
+            *spawn_cmd,
             cwd=self.workspace_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        if self._process_owner:
+            self._process_owner.record_child(self._process.pid, cmd, spawn_cmd)
         logger.info("Codex app-server PID %s", self._process.pid)
 
         asyncio.create_task(_drain_stream(self._process.stdout, "codex-app-stdout"))
@@ -1521,8 +1548,20 @@ class CodexWebSocketTransport(CLITransport):
             return
 
         if item_type == "webSearch":
-            await self._emit_tool_use(item_id, "WebSearch", {"query": item.get("query", "")})
+            await self._emit_tool_use(item_id, "WebSearch", self._web_search_input(item))
             return
+
+    @staticmethod
+    def _web_search_input(item: dict) -> dict:
+        """Keep native search/open/find arguments, including fields added by Codex."""
+        action = item.get("action")
+        query = item.get("query") or ""
+        if not query and isinstance(action, dict):
+            query = action.get("query") or action.get("url") or ""
+        result = {"query": query}
+        if isinstance(action, dict):
+            result["action"] = dict(action)
+        return result
 
     async def _handle_item_completed(self, item: dict) -> None:
         """Emit content_block_stop and any final content when an item completes."""
@@ -1601,7 +1640,44 @@ class CodexWebSocketTransport(CLITransport):
             await self._emit_content_block_stop()
             return
 
-        if item_type in ("fileChange", "mcpToolCall", "webSearch"):
+        if item_type == "webSearch":
+            await self._emit_content_block_stop()
+            # Started notifications may be placeholders with an empty query.
+            # Refresh the existing call's input by ID, without starting another
+            # streaming block. Both live and durable folds upsert this tool ID.
+            await self._emit(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "model": self._model,
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": item_id,
+                                "name": "WebSearch",
+                                "input": self._web_search_input(item),
+                            }
+                        ],
+                    },
+                }
+            )
+            if item.get("results") is not None:
+                # The app-server schema intentionally leaves these result objects
+                # opaque: retain search hits, open-page results, and future fields.
+                output = json.dumps(
+                    {key: item[key] for key in ("query", "action", "results") if key in item},
+                    ensure_ascii=False,
+                )
+            else:
+                output = self._extract_item_result_text(item)
+                if not output:
+                    output = self._consume_buffered_item_output(item_id)
+            await self._emit_tool_result(
+                item_id, output, is_error=bool(item.get("isError") or item.get("is_error"))
+            )
+            return
+
+        if item_type in ("fileChange", "mcpToolCall"):
             await self._emit_content_block_stop()
             result_text = self._extract_item_result_text(item)
             if not result_text:

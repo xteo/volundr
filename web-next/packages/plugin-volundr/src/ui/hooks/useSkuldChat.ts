@@ -53,7 +53,13 @@ type CliStreamEvent = {
   message?: {
     model?: string;
     usage?: { input_tokens?: number; output_tokens?: number };
-    content?: Array<{ type: string; text?: string }>;
+    content?: Array<{
+      type: string;
+      text?: string;
+      id?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+    }>;
   };
   content_block?: {
     type?: string;
@@ -947,6 +953,32 @@ export function useSkuldChat(
       for (const event of events) {
         switch (event.type) {
           case 'assistant': {
+            const blocks = event.message?.content;
+            if (
+              streamingMessageIdRef.current &&
+              blocks?.length &&
+              blocks.every(
+                (block) =>
+                  block.type === 'tool_use' &&
+                  block.id &&
+                  streamingPartsRef.current.some(
+                    (part) => part.type === 'tool_use' && part.id === block.id,
+                  ),
+              )
+            ) {
+              // Native tool completion can enrich the original call after its input
+              // block closed. Keep that refresh in the same message and tool card.
+              const updates = new Map(blocks.map((block) => [block.id, block]));
+              streamingPartsRef.current = streamingPartsRef.current.map((part) => {
+                const update = part.type === 'tool_use' ? updates.get(part.id) : undefined;
+                return update && part.type === 'tool_use'
+                  ? { ...part, name: update.name ?? part.name, input: update.input ?? part.input }
+                  : part;
+              });
+              setStreamingParts([...streamingPartsRef.current]);
+              syncStreamingMessage();
+              break;
+            }
             ensureSingleParticipant();
             if (streamingMessageIdRef.current) finalizeStreaming();
             const initialContent =

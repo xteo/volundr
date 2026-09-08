@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from scripts.forge_live import Options, Platform, make_workspace
+from scripts.forge_live import Observer, Options, Platform, make_workspace
 from scripts.forge_trace import (
     check_scenario,
     compare_streams,
@@ -303,3 +303,134 @@ def test_interim_agent_results_do_not_fail_correlated_scenario(tmp_path):
     assert not check_scenario(
         scenario, [terminal(result=marker), terminal(result=marker)], tmp_path
     )["passed"]
+
+
+@pytest.mark.parametrize(
+    "tool_input,output,passed",
+    [
+        ({"query": ""}, "", False),
+        ({"query": "json.loads"}, "", False),
+        ({"query": ""}, "actual search hits", False),
+        ({"query": "json.loads"}, '{"query":"json.loads","results":[]}', False),
+        ({"query": "json.loads"}, "[]", False),
+        ({"query": "json.loads"}, "{}", False),
+        ({"query": "json.loads"}, "null", False),
+        ({"query": "json.loads"}, "  ", False),
+        ({"query": "json.loads"}, '{"results":[{"url":"https://docs.python.org"}]}', True),
+        ({"action": {"type": "openPage", "url": "https://docs.python.org"}}, "actual page", True),
+        ({"action": {"type": "search", "queries": ["json.loads"]}}, "actual hits", True),
+        ({"search_query": [{"q": "json.loads"}]}, "actual hits", True),
+        ({"query": "json.loads"}, "legacy native search hits", True),
+    ],
+)
+def test_search_capture_requires_actual_arguments_and_results(tmp_path, tool_input, output, passed):
+    frame = call(name="WebSearch")
+    frame["message"]["content"][0]["input"] = tool_input
+    scenario = {"id": "search", "required_tools": ["search"]}
+    assert (
+        check_scenario(scenario, [frame, result(text=output), terminal()], tmp_path)["passed"]
+        is passed
+    )
+
+
+def test_completed_search_refresh_counts_one_call_and_uses_updated_input(tmp_path):
+    before = call(name="WebSearch")
+    before["message"]["content"][0]["input"] = {"query": ""}
+    after = call(name="WebSearch")
+    after["message"]["content"][0]["input"] = {"query": "json.loads"}
+    checked = check_scenario(
+        {"id": "search", "required_tools": ["search"]},
+        [before, after, result(text="actual search hits"), terminal()],
+        tmp_path,
+    )
+    assert checked["passed"]
+    assert checked["observed"]["tool_families"]["search"] == 1
+
+
+class _ObserverSocket:
+    def __init__(self, frames):
+        self.frames = frames
+        self.sent = []
+
+    async def __aiter__(self):
+        for frame in self.frames:
+            yield json.dumps(frame)
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+
+async def test_question_fixture_does_not_answer_later_permission_card():
+    question = {
+        "type": "ask_user_question",
+        "request_id": "accent",
+        "questions": [
+            {"question": "Which accent?", "options": [{"label": "Blue"}, {"label": "Amber"}]}
+        ],
+    }
+    permission = {
+        "type": "ask_user_question",
+        "request_id": "permission",
+        "metadata": {"source": "tmux_tty_bridge"},
+        "questions": [
+            {
+                "question": "Allow AskUserQuestion?",
+                "options": [
+                    {"label": "Allow"},
+                    {"label": "Allow & don't ask again"},
+                    {"label": "Deny"},
+                ],
+            }
+        ],
+    }
+    frames = [question, permission, permission, terminal()]
+    observer = Observer(None, "synthetic")
+    observer.answer = "amber"
+    observer.ws = _ObserverSocket(frames)
+    await observer._receive()
+    assert [frame["request_id"] for frame in observer.ws.sent] == ["accent"]
+    assert observer.ws.sent[0]["answers"][0]["answer"] == "amber"
+    assert observer.frames == frames  # All evidence survives, including blocked controls.
+    assert len(observer.records) == len(frames)
+    assert observer.blocked_control_answers == {
+        "permission": {
+            "request_id": "permission",
+            "reason": "permission_card",
+            "automatically_answered": False,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "options,metadata,answer,reason",
+    [
+        ([{"label": "Allow"}, {"label": "Deny"}], {}, "Allow", "permission_card"),
+        ([], {"control_kind": "permission"}, "yes", "permission_card"),
+        ([{"label": "Blue"}, {"label": "Amber"}], {}, "violet", "answer_not_declared_option"),
+        ([{"label": "Blue"}, {"label": "Amber"}], {}, "AMBER", None),
+        ([], {}, "violet comet", None),
+        (None, {}, "violet comet", None),
+        ([{}], {}, "amber", "answer_not_declared_option"),
+        ("malformed", {}, "amber", "invalid_options"),
+    ],
+)
+async def test_observer_autoanswer_respects_question_kind_and_declared_options(
+    options, metadata, answer, reason
+):
+    frame = {
+        "type": "ask_user_question",
+        "request_id": "control",
+        "metadata": metadata,
+        "questions": [{"question": "Synthetic choice", "options": options}],
+    }
+    observer = Observer(None, "synthetic")
+    observer.answer = answer
+    observer.ws = _ObserverSocket([frame])
+    await observer._receive()
+    assert bool(observer.ws.sent) is (reason is None)
+    if reason:
+        assert observer.blocked_control_answers["control"]["reason"] == reason
+        assert "control" not in observer.answers
+    else:
+        assert observer.ws.sent[0]["answers"][0]["answer"] == answer
+        assert not observer.blocked_control_answers

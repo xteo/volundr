@@ -300,6 +300,22 @@ def apply_assistant_blocks(
             summary = str(block["thinking"])[-_REASONING_TAIL:]
             acc.parts.append({"type": "reasoning", "text": summary})
         elif btype == "tool_use" and block.get("id"):
+            existing = next(
+                (
+                    part
+                    for part in reversed(acc.parts)
+                    if part.get("type") == "tool_use" and part.get("id") == block["id"]
+                ),
+                None,
+            )
+            if existing is not None:
+                # Native tools can reveal their arguments only at completion.
+                # A same-ID refresh enriches the original card; its original
+                # timing and attribution remain authoritative when omitted here.
+                for key in ("name", "input", "parent_tool_use_id", "agent_id"):
+                    if key in block:
+                        existing[key] = block[key]
+                continue
             part: dict[str, Any] = {
                 "type": "tool_use",
                 "id": block.get("id"),

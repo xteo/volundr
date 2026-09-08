@@ -1504,6 +1504,22 @@ class TmuxInteractiveTransport(CLITransport):
         """
         tool_name = self._coerce_str(payload.get("tool_name")) or "this action"
         tool_input = payload.get("tool_input")
+        # In bypass mode AskUserQuestion still fires PermissionRequest for the
+        # question itself. PreToolUse already surfaced that exact question. Keep
+        # the advisory hook event, but do not invent a second authorization gate.
+        if (
+            self._skip_permissions
+            and tool_name == "AskUserQuestion"
+            and isinstance(tool_input, dict)
+            and tool_input.get("questions")
+            and any(
+                pending.get("kind") == "question"
+                and not pending.get("answer_uncertain")
+                and pending.get("questions") == tool_input["questions"]
+                for pending in self._pending_tty_prompts.values()
+            )
+        ):
+            return
         detail = self._permission_detail(tool_name, tool_input)
         request_id = self._next_tty_request_id()
         question = {
@@ -1517,7 +1533,11 @@ class TmuxInteractiveTransport(CLITransport):
             "multiSelect": False,
         }
         self._cancel_submit_confirmations()
-        self._pending_tty_prompts[request_id] = {"kind": "permission", "tool_name": tool_name}
+        self._pending_tty_prompts[request_id] = {
+            "kind": "permission",
+            "tool_name": tool_name,
+            "questions": [question],
+        }
         await self._emit_ask_user_question(request_id, [question])
 
     async def _surface_tty_ask_user_question(self, tool_input: dict[str, Any]) -> None:
@@ -1545,7 +1565,10 @@ class TmuxInteractiveTransport(CLITransport):
                 "request_id": request_id,
                 "tool_use_id": request_id,
                 "questions": questions,
-                "metadata": {"source": "tmux_tty_bridge"},
+                "metadata": {
+                    "source": "tmux_tty_bridge",
+                    "control_kind": self._pending_tty_prompts[request_id]["kind"],
+                },
             }
         )
 
@@ -1574,10 +1597,9 @@ class TmuxInteractiveTransport(CLITransport):
     ) -> None:
         """Translate a structured `ask_user_answer` into the keystroke that drives the TTY menu.
 
-        Robust by design: DENY is always `Escape` (cancels any menu shape); ALLOW/option selection
-        reads the LIVE numbered menu and presses the matched row's digit (race-free, and tolerant of
-        2- vs 3-row menus). For the AskUserQuestion tool we confirm the digit with Enter (its
-        select-list needs it); a permission gate acts on the digit alone.
+        Validate the declared choices and the current menu before sending any
+        keys, including Escape. For AskUserQuestion we confirm the digit with
+        Enter; a permission gate acts on the digit alone.
         """
         pending = self._pending_tty_prompts.get(request_id) if request_id else None
         if pending is None:
@@ -1592,24 +1614,64 @@ class TmuxInteractiveTransport(CLITransport):
         if not chosen.strip():
             raise ValueError("Claude question requires an explicit answer")
         kind = pending.get("kind")
+        questions = pending.get("questions") or []
+        question = questions[0] if questions and isinstance(questions[0], dict) else {}
+        labels = [
+            option["label"].strip().casefold()
+            for option in question.get("options", [])
+            if isinstance(option, dict) and isinstance(option.get("label"), str)
+        ]
+        low = chosen.strip().casefold()
+        first = answers[0] if isinstance(answers, list) and answers else None
+        explicit_text = (
+            isinstance(first, dict)
+            and first.get("free_text") == chosen
+            and not first.get("option_indexes")
+        )
+        freeform = (
+            kind == "question"
+            and bool(question)
+            and ((not labels) or (explicit_text and low not in labels))
+        )
+        if kind == "permission" and low not in {"allow", "allow & don't ask again", "deny"}:
+            raise ValueError("The requested answer is not a declared Claude permission option")
+        if labels and low not in labels and not freeform:
+            raise ValueError("The requested answer is not a declared Claude question option")
 
-        if kind == "permission" and self._is_deny_answer(chosen):
+        rows = await self._capture_menu_rows_wait(pane_id=pane_id)
+        if kind == "permission":
+            digit = self._permission_menu_digit(low, rows)
+        else:
+            live_labels = {label.strip().casefold() for _, label in rows}
+            # Native Other/Chat/Submit rows may be present in addition to the
+            # declared options. Every declared option must still belong to this
+            # menu; a substring in an unrelated menu is not sufficient evidence.
+            if labels and not set(labels).issubset(live_labels):
+                raise ValueError("The live Claude menu does not match the pending question")
+            target = "type something." if freeform else low
+            digit = self._match_menu_digit(target, rows)
+        if digit is None:
+            raise ValueError("The requested answer does not match the live Claude menu")
+
+        if kind == "permission" and low == "deny":
             pending["answer_uncertain"] = True
             await self._send_key("Escape", pane_id=pane_id)
             self._pending_tty_prompts.pop(request_id, None)
             await self._emit_ask_user_resolved(request_id, "deny")
             return
 
-        rows = await self._capture_menu_rows_wait(pane_id=pane_id)
-        digit = self._match_menu_digit(chosen, rows)
-        if digit is None:
-            raise ValueError("The requested answer does not match the live Claude menu")
         # A key-send failure may occur after tmux consumed the key. Retain the
         # question evidence but reject retries until native completion/reissue.
         pending["answer_uncertain"] = True
         await self._send_key(str(digit), pane_id=pane_id)
         if kind == "question":
             await self._send_key("Enter", pane_id=pane_id)
+            if freeform:
+                # Literal bracketed paste preserves the user's typed text. Avoid
+                # the composer submit-retry loop: a repeated Enter can answer the
+                # next question after this one has already completed.
+                await self._paste_text(chosen, enter=False, pane_id=pane_id)
+                await self._send_key("Enter", pane_id=pane_id)
         self._pending_tty_prompts.pop(request_id, None)
         await self._emit_ask_user_resolved(request_id, chosen or "answered")
 
@@ -1639,57 +1701,48 @@ class TmuxInteractiveTransport(CLITransport):
         """Numbered option rows currently on screen, e.g. [(1,'Yes'), (2,'…ask'), (3,'No')]."""
         target = self._target_pane(pane_id)
         try:
-            result = await self._run_tmux("capture-pane", "-t", target, "-p", "-S", "-50")
+            result = await self._run_tmux("capture-pane", "-t", target, "-p")
         except Exception:  # pragma: no cover - capture is best-effort
             return []
         out: list[tuple[int, str]] = []
-        seen: set[int] = set()
         for line in result.stdout.splitlines():
             match = _MENU_ROW_RE.match(line)
             if match:
                 digit = int(match.group(1))
-                if digit not in seen:
-                    seen.add(digit)
-                    out.append((digit, match.group(2).strip()))
-        return sorted(out)
+                # If two menus are still visible, the last menu owns input.
+                # Never combine an old first row with a newer menu's later rows.
+                if out and digit <= out[-1][0]:
+                    out.clear()
+                out.append((digit, match.group(2).strip()))
+        return out
 
     @staticmethod
     def _match_menu_digit(chosen: str, rows: list[tuple[int, str]]) -> int | None:
-        """Map the chosen option label to its on-screen menu digit, or None if no clear match."""
-        low = chosen.strip().lower()
-        if not low or not rows:
-            return None
-        # 1a) EXACT label match over ALL rows first — a verbatim choice must win
-        # over any shorter substring row. Without this exact-first pass, choosing
-        # "Allow & don't ask again" would be captured by row "Allow" via the
-        # substring test below and silently downgraded to a one-time allow.
-        for digit, label in rows:
-            if low == label.lower():
-                return digit
-        # 1b) substring match (one label contains the other), in row order.
-        for digit, label in rows:
-            ll = label.lower()
-            if low in ll or ll in low:
-                return digit
-        # 2) "allow & don't ask again" / "always" → the persistent-allow row.
-        if "don't ask" in low or "always" in low:
-            for digit, label in rows:
-                if "don't ask" in label.lower() or "always" in label.lower():
-                    return digit
-        # 3) plain "allow"/"yes" → the first (affirmative) row.
-        if low.startswith(("allow", "yes")):
-            return rows[0][0]
-        # 4) "deny"/"no" → a row that reads as the negative.
-        if low.startswith(("deny", "no")):
-            for digit, label in rows:
-                if label.lower().startswith("no"):
-                    return digit
-        return None
+        """Match a declared choice exactly; substrings can belong to unrelated menus."""
+        target = chosen.strip().casefold()
+        return next(
+            (digit for digit, label in rows if label.strip().casefold() == target),
+            None,
+        )
 
     @staticmethod
-    def _is_deny_answer(chosen: str) -> bool:
-        low = chosen.strip().lower()
-        return low.startswith(("deny", "no"))
+    def _permission_menu_digit(chosen: str, rows: list[tuple[int, str]]) -> int | None:
+        """Resolve only a recognizable permission menu, never an arbitrary first row."""
+        choices: dict[str, int] = {}
+        for digit, label in rows:
+            low = label.strip().casefold()
+            if re.match(r"^(yes|allow)(?:$|[, &])", low):
+                if "don't ask" in low:
+                    choices.setdefault("allow & don't ask again", digit)
+                elif low in {"yes", "allow", "yes, allow this time", "allow once"}:
+                    # A second affirmative row may grant a session-wide policy.
+                    # Unknown scopes must not overwrite the one-time Allow row.
+                    choices.setdefault("allow", digit)
+            elif re.match(r"^(no|deny)(?:$|[, ])", low):
+                choices["deny"] = digit
+        if "allow" not in choices or "deny" not in choices:
+            return None
+        return choices.get(chosen)
 
     @staticmethod
     def _first_answer_text(answers: object) -> str:

@@ -139,6 +139,35 @@ class Platform:
         return frames
 
 
+def question_autoanswer_block_reason(frame: dict, answer: str) -> str | None:
+    """A question fixture never authorizes permission choices or unrelated options."""
+    metadata = frame.get("metadata") or {}
+    if metadata.get("control_kind") == "permission":
+        return "permission_card"
+    questions = frame.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return "invalid_question"
+    for question in questions:
+        if not isinstance(question, dict):
+            return "invalid_question"
+        options = question.get("options") or []
+        if not isinstance(options, list):
+            return "invalid_options"
+        labels = {
+            option["label"].strip().casefold()
+            for option in options
+            if isinstance(option, dict) and isinstance(option.get("label"), str)
+        }
+        # Older TTY bridges carry permission gates in ask_user_question frames
+        # without an explicit kind. Their stable Allow/Deny shape is sufficient
+        # to withhold automation, even when the fixed fixture answer is Allow.
+        if "allow" in labels and "deny" in labels:
+            return "permission_card"
+        if options and answer.strip().casefold() not in labels:
+            return "answer_not_declared_option"
+    return None
+
+
 class Observer:
     def __init__(self, platform: Platform, sid: str):
         self.platform = platform
@@ -149,6 +178,7 @@ class Observer:
         self.ws = None
         self.answer: str | None = None
         self.answers: set[str] = set()
+        self.blocked_control_answers: dict[str, dict] = {}
 
     async def start(self):
         self.ws = await connect(
@@ -170,6 +200,17 @@ class Observer:
             if frame.get("type") == "ask_user_question" and self.answer is not None:
                 rid = frame.get("request_id")
                 if rid and rid not in self.answers:
+                    reason = question_autoanswer_block_reason(frame, self.answer)
+                    if reason is not None:
+                        self.blocked_control_answers.setdefault(
+                            rid,
+                            {
+                                "request_id": rid,
+                                "reason": reason,
+                                "automatically_answered": False,
+                            },
+                        )
+                        continue
                     self.answers.add(rid)
                     await self.ws.send(
                         json.dumps(
@@ -314,6 +355,7 @@ async def run_provider(
         "scenarios": [],
         "errors": [],
         "review": {"status": "pending"},
+        "control_answer_policy": {"question_fixtures_only": True, "permission_autoanswer": False},
     }
     write_json(output / "manifest.json", report)
     try:
@@ -389,6 +431,7 @@ async def run_provider(
                 result["error"] = scenario_error
                 result["passed"] = False
             report["scenarios"].append(result)
+            report["blocked_control_answers"] = list(observer.blocked_control_answers.values())
             write_json(output / "manifest.json", report)
             write_json(output / "live.json", observer.records)
             failed = [c["name"] for c in result["checks"] if not c["passed"]]
@@ -415,6 +458,7 @@ async def run_provider(
             except Exception as exc:
                 report["errors"].append(f"observer cleanup: {type(exc).__name__}")
             write_json(output / "live.json", observer.records)
+            report["blocked_control_answers"] = list(observer.blocked_control_answers.values())
         if sid:
             try:
                 await platform.request("POST", f"{API}/{sid}/stop")

@@ -88,6 +88,40 @@ def evidence(frames: list[dict]) -> dict:
     }
 
 
+def _has_search_arguments(value: Any) -> bool:
+    """A tool name alone cannot prove that its actual query/open target survived."""
+    if not isinstance(value, dict):
+        return False
+    if any(
+        isinstance(value.get(key), str) and value[key].strip()
+        for key in ("query", "q", "url", "ref_id", "pattern")
+    ):
+        return True
+    if isinstance(value.get("queries"), list) and any(
+        isinstance(query, str) and query.strip() for query in value["queries"]
+    ):
+        return True
+    if _has_search_arguments(value.get("action")):
+        return True
+    return any(
+        isinstance(value.get(key), list)
+        and any(_has_search_arguments(entry) for entry in value[key])
+        for key in ("search_query", "open", "find")
+    )
+
+
+def _has_search_results(value: Any) -> bool:
+    if isinstance(value, str):
+        value = value.strip()
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return bool(value)
+    if isinstance(value, dict) and "results" in value:
+        return bool(value["results"])
+    return bool(value)
+
+
 def check_scenario(scenario: dict, frames: list[dict], workspace: Path) -> dict:
     observed = evidence(frames)
     checks: list[dict] = []
@@ -115,6 +149,25 @@ def check_scenario(scenario: dict, frames: list[dict], workspace: Path) -> dict:
     for family in scenario.get("required_tools", []):
         count = observed["tool_families"].get(family, 0)
         check(f"tool:{family}", count > 0, count)
+    if "search" in scenario.get("required_tools", []):
+        search_calls = [
+            call
+            for call in observed["calls"].values()
+            if call.get("name", "").lower().removeprefix("functions.") in TOOL_FAMILIES["search"]
+        ]
+        check(
+            "search-inputs-captured",
+            bool(search_calls)
+            and all(_has_search_arguments(call.get("input")) for call in search_calls),
+        )
+        check(
+            "search-results-captured",
+            bool(search_calls)
+            and all(
+                _has_search_results(observed["results"].get(call["id"], {}).get("content"))
+                for call in search_calls
+            ),
+        )
     outputs = canonical(list(observed["results"].values()))
     for marker in scenario.get("tool_output_contains", []):
         check(f"tool-output:{marker}", marker in outputs)
