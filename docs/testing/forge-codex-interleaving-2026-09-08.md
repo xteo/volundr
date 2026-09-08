@@ -1,9 +1,13 @@
 # Codex message and tool interleaving: implementation and acceptance
 
-Status: implementation and simulator acceptance passed; guarded rollout is
-being prepared. The production baseline remains `forge-2026.09.08.4` with
-Lexi build 2240 until the deployment evidence below is recorded. The app
-candidate is build 2241 at `20273018d831d2522f8b91594345a93739dbdc1a`.
+Status: Forge `forge-2026.09.08.5` is deployed on the platform and all six
+retained brokers. The physics history repair is applied and passed independent native-log,
+database and simulator checks. Lexi build 2241 passed simulator acceptance and is available in TestFlight
+for both iOS and macOS.
+
+The backend release tag pins `596cacb54d60f649ebb9747f9e526b63cae74b0e`, with
+source SHA-256 `1fdc9f20506fc230f2da6846aab11508a2d54287904991fadbd4eae2ea384924`.
+The app candidate pins `20273018d831d2522f8b91594345a93739dbdc1a`.
 
 ## Incident and verified cause
 
@@ -123,11 +127,12 @@ stored marker cannot disagree with its validated digest.
 A fresh private backup now contains all six retained sessions, their native
 prefixes/cache/control state, and 432,917 raw rows. Its manifest SHA-256 is
 `cd19c2a03ba3e88aa698baef59ed94c5e9925f5eecbea86fb0bd16ba5b15a3cf`.
-The later read-only physics preview at raw head 4,410 reconstructs six completed
-assistant turns with 25 individually verified native public messages. The
+The later read-only physics preview at raw head 4,410 reconstructs six
+assistant responses with 25 individually verified native public messages. The
 session has 12 total turns after new user activity since the first backup. All original text
-bytes, nontext parts and turn IDs match. Applying that preview remains a
-separate guarded step; the preview alone is not a database repair.
+bytes, nontext parts and turn IDs match. The guarded repair was subsequently
+applied while the broker was stopped, then verified against the cold database
+rebuild and resumed live history.
 
 ## Acceptance matrix
 
@@ -224,6 +229,85 @@ All existing raw corpus captures and original capture reviews remain
 unchanged; six Codex text projections and six Claude terminal-tail projections
 have separate reviewed updates. Two newly captured interleaving scenarios
 retain their complete observed intervals and public native oracle hashes.
+
+## Deployed backend acceptance
+
+The platform cutover preserved all eight broker processes then present. Each of
+the six retained user brokers was separately checked idle twice, backed up,
+stopped, and resumed with its original native identity. Every original ordered
+turn ID remained present exactly once. The large agents-brain cache retained
+all 89 turns; it was not discarded for a bounded cold rebuild. Agents-astra
+also received two conservative automatic text enrichments whose original prose
+and nontext parts were independently checked by the repair contract.
+
+The physics repair now has six assistant responses with 25 native
+public messages across 12 total turns. Its cache, append-only database marker,
+cold reconstruction, and full/shallow/incremental HTTP histories agree. The
+independent direct native-log oracle verifies all 25 public IDs/phases/text
+bytes, and the 4,412 pre-repair rows remain exact before marker 4,413. All 139
+original tool calls and 137 results remain unchanged. Two previously cancelled
+responses retain their interrupted status; cold replay remains partial because
+those original incomplete outcomes are preserved. The
+revision is `text-items-1:e8f185f33f123241b9198976`. This is a repair of the
+visible projection; original ledger entries and native transcript bytes remain
+untouched. A post-rollout streaming comparison verified all 432,917 saved raw
+rows and every frozen native-log prefix byte-for-byte across all six sessions.
+
+Actual build 2241 cold-loaded the repaired physics session and retained its
+12 ordered turn IDs and 25 exact native text items after a full app relaunch.
+The cached revision matches, and the 166,724-byte cache has the same hash before
+and after reopening. Screenshots and accessibility ordering verify commentary
+between command groups in both the first and latest responses. No old physics
+cache was present on this simulator before the check, so the actual observation
+proves cold load/reopen; stale-revision invalidation is separately covered by
+the focused cache tests.
+
+The temporary main-process maintenance override has been removed. Normal
+`Restart=always`, `KillMode=control-group`, and the health timer are restored;
+the health check reports success. The two owned canaries are archived/stopped
+with their completed histories retained. There are six remaining live brokers,
+all on the new release.
+
+The existing Vite viewer on port 5173 initially returned a cached module import
+error. All 16 generated stylesheet hashes already matched the candidate. A
+restart of only `niuu-forge-web.service` cleared that stale state: main module
+and CSS requests return 200 and the served chat hook contains both new ordering
+helpers. No tracked code or generated CSS was changed by this restart. The
+candidate production browser build also passed. The API server's root remains
+404 as before; this release does not introduce another browser hosting service.
+
+Frozen private backend evidence is under
+`/home/thor/.niuu/validation/forge-interleaving-20260908/backend-release-20260908T2252Z`.
+Its 1,009-file manifest SHA-256 is
+`cdae7ac3494dae94d47d8fb365c605217d575c02520f2ad3825d029f641c0ba2`.
+All six pre-release and immediate pre-stop backups are under
+`/home/thor/.niuu/backups/forge-interleaving-20260908`. Source and release tag are
+pushed to the project repository. The browser/simulator evidence already frozen
+under `/home/thor/.niuu/validation/forge-interleaving-20260908/` distinguishes
+actual native live layout, exact captured-trace playback, and normal-origin
+completed/reopened history checks.
+
+## App release acceptance
+
+At 2026-09-08 22:53:04 UTC, App Store Connect reports build 2241 as `VALID` and
+`IN_BETA_TESTING` on both platforms, attached to the existing internal testing
+group. iOS build ID is `a7350a78-0bf2-4880-a513-a00c73e1e4df`; macOS build ID is
+`4e97b627-35e1-4d61-b8a5-cef41113c960`. The immutable `lexi-build-2241` tag pins
+app source `20273018d831d2522f8b91594345a93739dbdc1a`.
+
+Both archives, exports and Apple validation passed. All 579 compiled source
+inputs and all 13 package pins match the tested candidate. Release entitlements
+retain approved baseline parity; the macOS archive has its sandbox enabled and
+debugger entitlement disabled. Signed artifacts and symbol UUIDs were verified.
+The iOS IPA SHA-256 is
+`a5f5275ef665c779aa4ac7794ea899df0289f88af825a73fb9bddede60d0d5a6`;
+the macOS package SHA-256 is
+`61d10920d1bd3acb50d4bf44eca616a908d8fce586b6f8e465a7ce39c637aa06`.
+Original app workspaces and their unrelated local edits remain untouched.
+
+Update Lexi through TestFlight to build 2241 and reopen the physics session.
+The interleaved history is persisted on the server and remains available after
+relaunch. Optional Markdown preferences are independent of this ordering fix.
 
 ## Optional structured-review wording
 
