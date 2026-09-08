@@ -524,6 +524,11 @@ class TestSendMessage:
 
         assert t._last_result is None
         assert t._last_usage is None
+        # Sending steering input must not renumber blocks in the active turn.
+        assert t._block_index == 5
+        await t._handle_server_message(
+            {"method": "turn/started", "params": {"turn": {"id": "new-turn"}}}
+        )
         assert t._block_index == 0
 
     @pytest.mark.asyncio
@@ -557,10 +562,13 @@ class TestEventNormalization:
         )
 
         events = _emitted_events(emit)
-        assert len(events) == 1
-        assert events[0]["type"] == "content_block_delta"
-        assert events[0]["delta"]["type"] == "text_delta"
-        assert events[0]["delta"]["text"] == "Hello "
+        assert len(events) == 2
+        assert events[0]["type"] == "content_block_start"
+        assert events[0]["content_block"]["id"] == "i1"
+        assert events[1]["type"] == "content_block_delta"
+        assert events[1]["delta"]["type"] == "text_delta"
+        assert events[1]["delta"]["text"] == "Hello "
+        assert events[1]["item_id"] == "i1"
 
     @pytest.mark.asyncio
     async def test_reasoning_delta(self, tmp_path):
@@ -2874,10 +2882,11 @@ class TestEmitTextDelta:
 
         await t._emit_text_delta("hello")
 
-        assert emit.call_count == 1
+        assert emit.call_count == 2  # A late attachment still receives its text anchor.
         event = emit.call_args[0][0]
         assert event["delta"]["type"] == "text_delta"
         assert event["delta"]["text"] == "hello"
+        assert event["item_id"] == emit.call_args_list[0][0][0]["content_block"]["id"]
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ connects back to Skuld.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -20,9 +21,11 @@ import sys
 import tempfile
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
+from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection, unix_connect
@@ -48,6 +51,24 @@ from skuld.transports.owned_codex_process import OwnedCodexProcess, OwnedProcess
 from skuld.transports.tool_shims import ensure_codex_tool_shims
 
 logger = logging.getLogger("skuld.transport")
+
+
+@dataclass
+class _CodexTextItem:
+    """One public native message, independent of other messages in its turn."""
+
+    id: str
+    index: int
+    id_source: str
+    thread_id: str | None = None
+    turn_id: str | None = None
+    phase: str | None = None
+    private: bool = False
+    started: bool = False
+    completion_fingerprint: str | None = None
+    streamed_hash: Any = field(default_factory=hashlib.sha256)
+    streamed_bytes: int = 0
+
 
 _MAX_WS_FRAME_BYTES = 1024 * 1024
 _WS_FRAME_HEADROOM_BYTES = 8 * 1024
@@ -208,6 +229,7 @@ class CodexWebSocketTransport(CLITransport):
         initial_prompt: str = "",
         codex_port: int = 0,
         codex_receive_max_bytes: int = 16 * 1024 * 1024,
+        live_frame_max_bytes: int = 900 * 1024,
         mcp_servers: list[dict] | None = None,
         resume_session_id: str = "",
         reasoning_effort: str = "",
@@ -228,6 +250,9 @@ class CodexWebSocketTransport(CLITransport):
         self._initial_prompt = initial_prompt
         self._codex_port = codex_port or _pick_free_port()
         self._receive_max_bytes = codex_receive_max_bytes
+        if live_frame_max_bytes <= 0:
+            raise ValueError("live_frame_max_bytes must be positive")
+        self._live_frame_max_bytes = live_frame_max_bytes
         self._mcp_servers = list(mcp_servers or [])
         self._mcp_overrides = build_codex_mcp_overrides(self._mcp_servers)
         self._resume_session_id = (resume_session_id or "").strip() or None
@@ -256,6 +281,8 @@ class CodexWebSocketTransport(CLITransport):
         self._alive = False
         self._start_lock = asyncio.Lock()
         self._block_index: int = 0
+        self._text_items: dict[str, _CodexTextItem] = {}
+        self._active_text_item_id: str | None = None
         self._pending_redirects: list[str] = []
         # Steering correlation, mirroring the tmux transport. (msg_id, request_id) is recorded when
         # we fire a turn/start for a user message and popped on the matching turn/started to emit
@@ -867,7 +894,12 @@ class CodexWebSocketTransport(CLITransport):
 
         # --- Streaming text ---
         if method == "item/agentMessage/delta":
-            await self._emit_text_delta(params.get("delta", ""))
+            await self._emit_text_delta(
+                params.get("delta", ""),
+                item_id=params.get("itemId"),
+                phase=params.get("phase") or params.get("channel"),
+                context={"thread_id": event_thread, "turn_id": event_turn},
+            )
             return
 
         # --- Reasoning / thinking ---
@@ -885,8 +917,11 @@ class CodexWebSocketTransport(CLITransport):
         # --- Turn lifecycle ---
         if method == "turn/started":
             turn = params.get("turn", {})
+            if turn.get("id") != self._current_turn_id:
+                self._text_items.clear()
+                self._active_text_item_id = None
+                self._block_index = 0
             self._current_turn_id = turn.get("id")
-            self._block_index = 0
             if self._is_context_compaction_turn(turn):
                 self._context_compaction_active = True
                 self._context_compaction_starting = False
@@ -1032,12 +1067,16 @@ class CodexWebSocketTransport(CLITransport):
         # --- Item lifecycle (tool calls, agent text blocks) ---
         if method == "item/started":
             item = params.get("item", {})
-            await self._handle_item_started(item)
+            await self._handle_item_started(
+                item, text_context={"thread_id": event_thread, "turn_id": event_turn}
+            )
             return
 
         if method == "item/completed":
             item = params.get("item", {})
-            await self._handle_item_completed(item)
+            await self._handle_item_completed(
+                item, text_context={"thread_id": event_thread, "turn_id": event_turn}
+            )
             return
 
         if method == "rawResponseItem/completed":
@@ -1415,6 +1454,144 @@ class CodexWebSocketTransport(CLITransport):
         """Emit a content_block_stop event."""
         await self._emit({"type": "content_block_stop"})
 
+    def _text_item(
+        self, identifier: object, *, phase: object = None, context: dict | None = None
+    ) -> _CodexTextItem:
+        native_id = identifier if isinstance(identifier, str) and identifier else None
+        context = context or {}
+        thread_id = context.get("thread_id") or self._thread_id
+        turn_id = context.get("turn_id") or self._current_turn_id
+        thread_id = thread_id if isinstance(thread_id, str) else None
+        turn_id = turn_id if isinstance(turn_id, str) else None
+        key = native_id or self._active_text_item_id
+        state = self._text_items.get(key) if key else None
+        if state is not None and (
+            (thread_id and state.thread_id and thread_id != state.thread_id)
+            or (turn_id and state.turn_id and turn_id != state.turn_id)
+        ):
+            state = None
+        if state is None:
+            state = _CodexTextItem(
+                id=native_id or f"codex-text-{uuid.uuid4()}",
+                index=self._next_block_index(),
+                id_source="native" if native_id else "synthetic",
+                thread_id=thread_id,
+                turn_id=turn_id,
+            )
+            self._text_items[state.id] = state
+        else:
+            state.thread_id = state.thread_id or thread_id
+            state.turn_id = state.turn_id or turn_id
+        if isinstance(phase, str) and phase in {"commentary", "final_answer"}:
+            state.phase = phase
+        elif phase == "analysis":
+            state.private = True
+        return state
+
+    def _text_context(self, state: _CodexTextItem) -> dict:
+        context = {"item_id": state.id, "index": state.index}
+        if state.thread_id:
+            context["thread_id"] = state.thread_id
+        if state.turn_id:
+            context["turn_id"] = state.turn_id
+        if state.phase:
+            context["phase"] = state.phase
+        if state.id_source == "synthetic":
+            context["metadata"] = {"text_identity_source": "synthetic"}
+        return context
+
+    def _text_block(self, state: _CodexTextItem, text: str, *, complete: bool) -> dict:
+        block = {
+            "type": "text",
+            "id": state.id,
+            "text": text,
+            "index": state.index,
+            "id_source": state.id_source,
+            "complete": complete,
+        }
+        if state.phase:
+            block["phase"] = state.phase
+        if state.thread_id:
+            block["thread_id"] = state.thread_id
+        if state.turn_id:
+            block["turn_id"] = state.turn_id
+        return block
+
+    async def _start_text_item(self, state: _CodexTextItem) -> None:
+        if state.private or state.started or state.completion_fingerprint is not None:
+            return
+        await self._emit(
+            {
+                "type": "content_block_start",
+                **self._text_context(state),
+                "content_block": self._text_block(state, "", complete=False),
+            }
+        )
+        state.started = True
+        self._active_text_item_id = state.id
+
+    async def _complete_text_item(self, item: dict, *, context: dict | None = None) -> bool:
+        """Reconcile authoritative text at its original anchor, once per completion.
+
+        A full native completion can repair missed or partial deltas. Its text
+        is an identity-based replacement, never another append to streamed text.
+        The boolean also prevents a repeated item from reopening an async question.
+        """
+        state = self._text_item(
+            item.get("id"), phase=item.get("phase") or item.get("channel"), context=context
+        )
+        text = item.get("text")
+        fingerprint = hashlib.sha256(
+            json.dumps([text if isinstance(text, str) else None, state.phase]).encode()
+        ).hexdigest()
+        if state.private or state.completion_fingerprint == fingerprint:
+            return False
+        first_completion = state.completion_fingerprint is None
+        text_proof = {}
+        if isinstance(text, str):
+            await self._start_text_item(state)
+            completion = {
+                "type": "assistant",
+                **self._text_context(state),
+                "message": {
+                    "model": self._model,
+                    "content": [self._text_block(state, text, complete=True)],
+                },
+            }
+            encoded_text = text.encode("utf-8")
+            text_proof = {
+                "text_bytes": len(encoded_text),
+                "text_sha256": hashlib.sha256(encoded_text).hexdigest(),
+            }
+            streamed_matches = (
+                len(encoded_text) == state.streamed_bytes
+                and hashlib.sha256(encoded_text).digest() == state.streamed_hash.digest()
+            )
+            # The live channel accepts 900 KiB by default, while Codex can send
+            # a 16 MiB native item. A redundant whole-message copy need not turn
+            # a successfully streamed answer into a REST recovery notice. Reserve
+            # room for broker envelope fields using the exact channel serializer.
+            oversized = len(json.dumps(completion, ensure_ascii=False).encode("utf-8")) > max(
+                1, self._live_frame_max_bytes - _WS_FRAME_HEADROOM_BYTES
+            )
+            if not (streamed_matches and oversized):
+                # Missing/partial/mismatching text still enters the durable log
+                # whole. The existing channel projection provides explicit REST
+                # recovery if it cannot fit; it never truncates authoritative text.
+                await self._emit(completion)
+        await self._emit(
+            {
+                "type": "content_block_stop",
+                **self._text_context(state),
+                "complete": True,
+                **text_proof,
+            }
+        )
+        state.completion_fingerprint = fingerprint
+        if self._active_text_item_id == state.id:
+            self._active_text_item_id = None
+        return first_completion
+
     async def _emit_tool_result(
         self, tool_use_id: str, content: str, *, is_error: bool = False
     ) -> None:
@@ -1491,7 +1668,7 @@ class CodexWebSocketTransport(CLITransport):
             }
         )
 
-    async def _handle_item_started(self, item: dict) -> None:
+    async def _handle_item_started(self, item: dict, *, text_context: dict | None = None) -> None:
         """Emit proper content_block lifecycle events when an item starts."""
         item_type = item.get("type", "")
         item_id = item.get("id", "")
@@ -1539,8 +1716,10 @@ class CodexWebSocketTransport(CLITransport):
             return
 
         if item_type == "agentMessage":
-            # Start a text content block — deltas will follow via agentMessage/delta.
-            await self._emit_content_block_start({"type": "text"})
+            state = self._text_item(
+                item_id, phase=item.get("phase") or item.get("channel"), context=text_context
+            )
+            await self._start_text_item(state)
             return
 
         if item_type == "reasoning":
@@ -1563,7 +1742,7 @@ class CodexWebSocketTransport(CLITransport):
             result["action"] = dict(action)
         return result
 
-    async def _handle_item_completed(self, item: dict) -> None:
+    async def _handle_item_completed(self, item: dict, *, text_context: dict | None = None) -> None:
         """Emit content_block_stop and any final content when an item completes."""
         item_type = item.get("type", "")
         item_id = item.get("id", "")
@@ -1608,9 +1787,8 @@ class CodexWebSocketTransport(CLITransport):
             return
 
         if item_type == "agentMessage":
-            # The full text was already streamed via item/agentMessage/delta
-            # notifications, so just close the block without re-emitting.
-            await self._emit_content_block_stop()
+            if not await self._complete_text_item(item, context=text_context):
+                return
             if item.get("delivery") == "async" and item.get("questions"):
                 questions = [
                     {
@@ -1871,17 +2049,32 @@ class CodexWebSocketTransport(CLITransport):
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _emit_text_delta(self, text: str) -> None:
-        """Emit a text delta event, filtering empties."""
-        if not text:
+    async def _emit_text_delta(
+        self,
+        text: str,
+        *,
+        item_id: object = None,
+        phase: object = None,
+        context: dict | None = None,
+    ) -> None:
+        """Keep arbitrary chunks on their own text item, without inserting bytes."""
+        if not isinstance(text, str) or not text:
             return
+        state = self._text_item(item_id, phase=phase, context=context)
+        if state.private or state.completion_fingerprint is not None:
+            return
+        await self._start_text_item(state)
         event = {
             "type": "content_block_delta",
+            **self._text_context(state),
             "delta": {"type": "text_delta", "text": text},
         }
         filtered = _filter_event(event)
         if filtered:
             await self._emit(filtered)
+            encoded = text.encode("utf-8")
+            state.streamed_hash.update(encoded)
+            state.streamed_bytes += len(encoded)
 
     @staticmethod
     def _is_context_window_error(error: object, message: object = "") -> bool:
@@ -2052,7 +2245,6 @@ class CodexWebSocketTransport(CLITransport):
 
         self._last_result = None
         self._last_usage = None
-        self._block_index = 0
         self._active_user_prompt = content
         # Correlate this turn/start back to the originating steer; popped on the matching
         # turn/started to emit user_consumed. Appended BEFORE the RPC so the correlation is ready

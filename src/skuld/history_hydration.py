@@ -8,6 +8,7 @@ from datetime import datetime
 
 import httpx
 
+from niuu.domain.text_projection import REPAIR_KEY, projection_digest, repair_legacy_turn
 from niuu.domain.transcript_reducer import reduce_frames
 
 
@@ -146,6 +147,24 @@ def merge_history_turns(durable: list[dict], local: list[dict]) -> list[dict]:
 def _merge_matching_turn(durable: dict, local: dict) -> dict:
     if durable.get("role") != local.get("role"):
         raise ValueError("Matching history identities have different roles")
+    replacement = repair_legacy_turn(local, durable)
+    if replacement is not None:
+        return replacement
+    # Public raw replay has captured boundaries but may lack native IDs/phases
+    # added by a verified repair. Preserve the enriched local projection only
+    # when exact ordered prose and all nontext content agree with durable data.
+    metadata = local.get("metadata")
+    proof = metadata.get(REPAIR_KEY) if isinstance(metadata, dict) else None
+    if isinstance(proof, dict) and proof.get("digest") == projection_digest(local):
+
+        def comparable(turn):
+            return [
+                {"type": "text", "text": part.get("text")} if part.get("type") == "text" else part
+                for part in turn.get("parts", [])
+            ]
+
+        if comparable(local) == comparable(durable):
+            return local
     content = _richer_prefix(durable.get("content", ""), local.get("content", ""))
     parts = _richer_prefix(durable.get("parts", []), local.get("parts", []))
     return {

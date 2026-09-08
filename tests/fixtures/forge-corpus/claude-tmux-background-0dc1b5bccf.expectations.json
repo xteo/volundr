@@ -167,21 +167,9 @@
         "stop_reason": "stop"
       },
       "visibility": "public"
-    },
-    {
-      "id": "cff4e31e-4e12-582e-9168-ff383c1c1801",
-      "role": "assistant",
-      "content": "ask only in ordinary prose.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response:\n  [FORGE_DONE:08d761c1bc714b9aa47e5440efd2fa96:question].\n  Never put this marker in worker instructions or interim\n  updates. It identifies completion of this request only.\n\n● User answered Claude's questions:\n  ⎿  · Which trace accent should I record in accent.json? →\n     Amber\n\n  Read 1 file (ctrl+o to expand)\n\n● Asked via the native interactive question tool (options:\n  Blue first, Amber second) and waited for your selection.\n\n  - You chose: Amber\n  - Wrote accent.json and read it back: {\"accent\": \"amber\"}\n    — accent value in lowercase under key accent.\n\n  [FORGE_DONE:08d761c1bc714b9aa47e5440efd2fa96:question]\n\n❯ 2Run a Python command that prints 200 numbered lines,\n  each containing the Unicode text café 東京. Then run a\n  successful command with no stdout. Summarize how many\n  lines were emitted. Keep the output in tool results\n  rather than repeating it in your final answer.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response: [FORGE_DONE:e601ab09df1a43\n  219ed386aa1d3c7ca9:long-output]. Never put this marker in\n  worker instructions or interim updates. It identifies\n  completion of this request only.\n\n● Bash(python3 -c '\n      for i in range(1, 201):…)\n  ⎿  001 café 東京\n     002 café 東京\n     003 café 東京\n     … +197 lines (ctrl+o to expand)\n\n● Bash(true)\n  ⎿  (No output)\n\n● Both commands ran.\n\n  - First command: emitted exactly 200 lines, numbered 001\n    through 200, each reading café 東京 with the Unicode\n    intact (no mojibake or escaping). Output stays in the\n    tool result above.\n  - Second command: true — exited 0 with no stdout at all.\n\n  [FORGE_DONE:e601ab09df1a43219ed386aa1d3c7ca9:long-output]\n\n❯ Run python3 -c 'import time; time.sleep(5);\n  print(\"FORGE_BACKGROUND_DONE\")'. This intentionally\n  completes while the observer is disconnected. Report\n  completion after observing the tool output.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response:\n  [FORGE_DONE:e15b5592cfd54f00b138be65e943ca11:background].\n  Never put this marker in worker instructions or interim\n  updates. It identifies completion of this request only.\n\n● Bash(python3 -c 'import time; time.sleep(5);\n      print(\"FORGE_BACKGROUND_DONE\")')\n  ⎿  FORGE_BACKGROUND_DONE\n\n● The command ran to completion and I observed its output\n  directly: it slept 5 seconds, then printed\n  FORGE_BACKGROUND_DONE, exiting 0. The delay spanned the\n  observer disconnect as intended, and the result was still\n  delivered intact in the tool output.\n\n  [FORGE_DONE:e15b5592cfd54f00b138be65e943ca11:background]\n\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for a…\n                                                       /rc\n\n  ● main\n  ◯ sum-worker     Read-only task, stay strictly i…  2m 0s\n  ◯ verify-worker  Read-only task, stay strictly i… 1m 57s",
-      "parts": [],
-      "created_at": "2026-09-07T16:46:27.700407+00:00",
-      "metadata": {
-        "provenance": "terminal_scrape",
-        "status": "interrupted"
-      },
-      "visibility": "public"
     }
   ],
-  "expected_partial": true,
+  "expected_partial": false,
   "source_run": {
     "run_id": "claude-tmux-ad948830dc",
     "session_id": "aba314d5-aafe-4487-afd1-b8306e121e6e",
@@ -230,5 +218,27 @@
       "assistant": 2,
       "result": 1
     }
+  },
+  "projection_review": {
+    "status": "accepted",
+    "reviewer": "Codex transport/corpus review agent, 2026-09-08",
+    "source_frames_sha256": "0dc1b5bccfc8b34ce018d14c3e106f1cca7e0e69b6a645a08ee99b030682d063",
+    "previous_projection_sha256": "63eefe5decf71e7227772c874d3e77b2225c9c5b378e6bdcdc8227964a0cdf3a",
+    "projection_sha256": "f49759e9d2d62bc4fe710e29cdd60684b02b29168f6e29e3918409403478c53c",
+    "reason": "Remove only verified idle terminal scrollback after a completed result. These paints created phantom assistant turns at EOF or the next human boundary; genuine terminal-only work remains supported.",
+    "all_real_turns_byte_identical": true,
+    "removed_phantom_turns": [
+      {
+        "turn_id": "cff4e31e-4e12-582e-9168-ff383c1c1801",
+        "prior_result_seq": 1164,
+        "idle_terminal_seq": 1170,
+        "old_metadata": {
+          "provenance": "terminal_scrape",
+          "status": "interrupted"
+        },
+        "old_text_sha256": "4e0c54b8543cddc577faa12c02ee71de6bbdee387e6dd05e2a463b99c8d54f58"
+      }
+    ],
+    "reducer_source_sha256": "33f1782405903e2e6b152a3435d36db95c6b2696e3675d67c72e15ed9083317d"
   }
 }

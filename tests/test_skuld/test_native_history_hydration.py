@@ -225,6 +225,7 @@ async def test_hydrated_prefix_survives_live_append_rest_and_websocket_snapshot(
     rest = await module.get_conversation_history()
     expected = ["Review Forge", "Original work", "Continue", "New work"]
     assert [turn["content"] for turn in rest["turns"]] == expected
+    assert rest["projection_revision"] == "text-items-1:0"
 
     websocket = AsyncMock()
     websocket.headers = {}
@@ -239,7 +240,60 @@ async def test_hydrated_prefix_survives_live_append_rest_and_websocket_snapshot(
     assert len(snapshots) == 1
     assert [turn["content"] for turn in snapshots[0]["turns"]] == expected
     assert snapshots[0]["head_seq"] > 10
+    assert snapshots[0]["projection_revision"] == rest["projection_revision"]
     assert all(row["seq"] > 10 for row in broker._event_log_buffer)
+
+
+async def test_in_progress_snapshot_does_not_mutate_after_text_or_tool_refresh(tmp_path):
+    broker = _broker(tmp_path)
+    await broker._handle_cli_event(
+        {
+            "type": "content_block_start",
+            "item_id": "message",
+            "index": 0,
+            "content_block": {"type": "text", "id": "message"},
+        }
+    )
+    await broker._handle_cli_event(
+        {
+            "type": "content_block_delta",
+            "item_id": "message",
+            "delta": {"type": "text_delta", "text": "Before"},
+        }
+    )
+    await broker._handle_cli_event(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "tool", "name": "exec", "input": {}},
+                ]
+            },
+        }
+    )
+    snapshot = broker._serialize_in_progress_turn()
+    before = json.dumps(snapshot, sort_keys=True)
+    await broker._handle_cli_event(
+        {
+            "type": "content_block_delta",
+            "item_id": "message",
+            "delta": {"type": "text_delta", "text": " after"},
+        }
+    )
+    await broker._handle_cli_event(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "tool", "name": "exec", "input": {"cmd": "true"}},
+                ]
+            },
+        }
+    )
+    assert json.dumps(snapshot, sort_keys=True) == before
+    current = broker._serialize_in_progress_turn()
+    assert current["parts"][0]["text"] == "Before after"
+    assert current["parts"][1]["input"] == {"cmd": "true"}
 
 
 async def test_startup_hydrates_before_creating_or_warming_transport(tmp_path, monkeypatch):

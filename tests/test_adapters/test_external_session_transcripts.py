@@ -125,6 +125,118 @@ async def test_modern_transcript_round_trips_humans_text_and_paired_tools(tmp_pa
     assert rows == await provider.read_transcript(NATIVE_ID, FORGE_ID)
 
 
+async def test_public_native_text_identity_phase_and_turn_survive_import(tmp_path):
+    root, _ = write_rollout(
+        tmp_path,
+        [
+            record("event_msg", {"type": "task_started", "turn_id": "turn-native"}),
+            completed(
+                {
+                    "type": "AgentMessage",
+                    "id": "commentary-a",
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "Checking café 東京."}],
+                }
+            ),
+            completed(
+                {
+                    "type": "AgentMessage",
+                    "id": "final-a",
+                    "phase": "final_answer",
+                    "content": [{"type": "Text", "text": "Done."}],
+                }
+            ),
+            record(
+                "event_msg",
+                {"type": "task_complete", "turn_id": "turn-native", "last_agent_message": "Done."},
+            ),
+        ],
+    )
+    rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+    blocks = [row.payload["message"]["content"][0] for row in rows if row.kind == "assistant"]
+    assert [(block["id"], block["phase"]) for block in blocks] == [
+        ("commentary-a", "commentary"),
+        ("final-a", "final_answer"),
+    ]
+    assert all(
+        block["turn_id"] == "turn-native"
+        and block["thread_id"] == NATIVE_ID
+        and block["complete"] is True
+        and block["id_source"] == "native"
+        for block in blocks
+    )
+    parts = reduce_frames(rows).turns[0]["parts"]
+    assert [part["phase"] for part in parts] == ["commentary", "final_answer"]
+    assert [part["text"] for part in parts] == ["Checking café 東京.", "Done."]
+
+
+async def test_import_without_native_text_id_has_stable_explicit_synthetic_identity(tmp_path):
+    public = message("assistant", "A public answer.")
+    public["payload"]["channel"] = "final_answer"
+    root, _ = write_rollout(tmp_path, [public])
+    provider = CodexSessionProvider(sessions_dir=str(root))
+    rows = await provider.read_transcript(NATIVE_ID, FORGE_ID)
+    block = rows[0].payload["message"]["content"][0]
+    assert block["id"] and block["id_source"] == "synthetic"
+    assert block["phase"] == "final_answer"
+    assert rows[0].payload["metadata"]["native_import"]["native_id"] is None
+    assert rows == await provider.read_transcript(NATIVE_ID, FORGE_ID)
+
+
+async def test_distinct_native_items_with_identical_text_remain_distinct(tmp_path):
+    root, _ = write_rollout(
+        tmp_path,
+        [
+            completed(
+                {
+                    "type": "AgentMessage",
+                    "id": identifier,
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "Checking."}],
+                }
+            )
+            for identifier in ("first", "second")
+        ],
+    )
+    rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+    parts = reduce_frames(rows).turns[0]["parts"]
+    assert [(part["id"], part["text"]) for part in parts] == [
+        ("first", "Checking."),
+        ("second", "Checking."),
+    ]
+
+
+async def test_task_complete_only_final_survives_prior_commentary(tmp_path):
+    root, _ = write_rollout(
+        tmp_path,
+        [
+            record("event_msg", {"type": "task_started", "turn_id": "turn-native"}),
+            completed(
+                {
+                    "type": "AgentMessage",
+                    "id": "progress",
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "Checking."}],
+                }
+            ),
+            record(
+                "event_msg",
+                {
+                    "type": "task_complete",
+                    "turn_id": "turn-native",
+                    "last_agent_message": "Final answer.",
+                },
+            ),
+        ],
+    )
+    rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+    parts = reduce_frames(rows).turns[0]["parts"]
+    assert [part["text"] for part in parts] == ["Checking.", "Final answer."]
+    assert parts[-1]["phase"] == "final_answer"
+    assert parts[-1]["complete"] is True and parts[-1]["id_source"] == "synthetic"
+    assert rows[-2].payload["metadata"]["native_import"]["native_id"] is None
+
+
 async def test_mirrored_formats_deduplicate_but_repeated_human_requests_survive(tmp_path):
     records = []
     for number in (1, 2):
@@ -200,7 +312,7 @@ async def test_legacy_functions_and_modern_execution_share_one_pair(tmp_path):
     )
     rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
 
-    assert [row.kind for row in rows] == ["user", "assistant", "user", "result"]
+    assert [row.kind for row in rows] == ["user", "assistant", "user", "assistant", "result"]
     assert rows[2].payload["message"]["content"][0]["is_error"]
     assert rows[-1].payload["result"] == "Command failed"
 
@@ -317,3 +429,100 @@ async def test_duplicate_native_message_id_with_conflicting_content_fails(tmp_pa
     )
     with pytest.raises(ValueError, match="Conflicting"):
         await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+
+
+async def test_async_question_agent_item_is_control_context_not_final_prose(tmp_path):
+    root, _ = write_rollout(
+        tmp_path,
+        [
+            record("turn_context", {"turn_id": "parent-turn"}),
+            message("assistant", "Checking.", identifier="commentary-a"),
+            record(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "call_id": "question-call",
+                    "name": "request_user_input_async",
+                    "arguments": '{"questions":[{"title":"Label?"}]}',
+                },
+            ),
+            completed(
+                {
+                    "type": "AgentMessage",
+                    "id": "question-call",
+                    "phase": "final_answer",
+                    "delivery": "async",
+                    "questions": [{"title": "Label?", "options": None}],
+                    "content": [{"type": "Text", "text": "CONTROL CARD CONTENT"}],
+                }
+            ),
+            record(
+                "response_item",
+                {
+                    "type": "function_call_output",
+                    "call_id": "question-call",
+                    "output": "Blue",
+                },
+            ),
+            message("assistant", "Continuing.", identifier="commentary-b"),
+            record(
+                "event_msg",
+                {
+                    "type": "task_complete",
+                    "turn_id": "parent-turn",
+                    "last_agent_message": "Continuing.",
+                },
+            ),
+        ],
+    )
+    rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+    parts = reduce_frames(rows).turns[0]["parts"]
+    assert [p["text"] for p in parts if p["type"] == "text"] == ["Checking.", "Continuing."]
+    assert [p["id"] for p in parts if p["type"] == "tool_use"] == ["question-call"]
+    assert [p["content"] for p in parts if p["type"] == "tool_result"] == ["Blue"]
+
+
+async def test_foreign_native_thread_items_do_not_enter_or_finish_parent_turn(tmp_path):
+    worker = completed(
+        {
+            "type": "AgentMessage",
+            "id": "worker-reply",
+            "phase": "final_answer",
+            "content": [{"type": "Text", "text": "WORKER"}],
+        }
+    )
+    worker["payload"].update(thread_id="worker-thread", turn_id="worker-turn")
+    root, _ = write_rollout(
+        tmp_path,
+        [
+            record("turn_context", {"turn_id": "parent-turn"}),
+            message("assistant", "Parent.", identifier="parent-reply"),
+            worker,
+            record(
+                "event_msg",
+                {
+                    "type": "task_complete",
+                    "thread_id": "worker-thread",
+                    "turn_id": "worker-turn",
+                    "last_agent_message": "WORKER",
+                },
+            ),
+            message("assistant", "Parent final.", identifier="parent-final"),
+            record(
+                "event_msg",
+                {
+                    "type": "task_complete",
+                    "thread_id": NATIVE_ID,
+                    "turn_id": "parent-turn",
+                    "last_agent_message": "Parent final.",
+                },
+            ),
+        ],
+    )
+    rows = await CodexSessionProvider(sessions_dir=str(root)).read_transcript(NATIVE_ID, FORGE_ID)
+    turns = reduce_frames(rows).turns
+    assert len(turns) == 1
+    assert [p["text"] for p in turns[0]["parts"] if p["type"] == "text"] == [
+        "Parent.",
+        "Parent final.",
+    ]

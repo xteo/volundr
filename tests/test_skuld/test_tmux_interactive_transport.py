@@ -801,7 +801,7 @@ async def test_message_display_hook_streams_interleaved_prose(tmp_path: Path) ->
         {
             "hook_event_name": "MessageDisplay",
             "turn_id": "turn-1",
-            "message_id": "msg-2b",
+            "message_id": "msg-2",
             "index": 0,
             "final": True,
             "delta": "Found it —\npatching.",

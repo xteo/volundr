@@ -15,6 +15,11 @@ from uuid import UUID
 
 import asyncpg
 
+from niuu.domain.text_projection import (
+    REPAIR_KIND,
+    apply_repair_markers,
+    projection_digest,
+)
 from volundr.adapters.outbound._jsonb import dumps_jsonb, force_scrub_json, scrub_text
 from volundr.domain.history_import import (
     HistoryImportConflictError,
@@ -48,6 +53,111 @@ class PostgresSessionEventLog(SessionEventLogRepository):
 
     def __init__(self, pool: asyncpg.Pool):
         self._pool = pool
+
+    async def append_projection_repair(
+        self, session_id: UUID, marker: dict, *, expected_head: int
+    ) -> int:
+        """Append a verified maintenance projection with a stopped-session CAS.
+
+        The operator must additionally verify the old broker is no longer alive
+        before replacing its cache. This transaction locks the same session row
+        as normal appends and validates every replacement against durable seeds.
+        It never updates or deletes an existing event. Exact retries are no-ops.
+        """
+        if type(expected_head) is not int or expected_head < 0:
+            raise ValueError("Projection repair requires a nonnegative expected head")
+        if not isinstance(marker, dict) or marker.get("type") != REPAIR_KIND:
+            raise ValueError("Invalid projection repair marker")
+        repairs = marker.get("repairs")
+        if not isinstance(repairs, list) or not repairs:
+            raise ValueError("Projection repair must contain verified replacements")
+        ids = [repair.get("turn_id") if isinstance(repair, dict) else None for repair in repairs]
+        if any(not isinstance(identity, str) or not identity for identity in ids):
+            raise ValueError("Projection repair turn identities must be nonempty strings")
+        if len(set(ids)) != len(ids):
+            raise ValueError("Projection repair contains duplicate turn identities")
+        if any(not isinstance(repair.get("proof"), dict) for repair in repairs):
+            raise ValueError("Projection repair lacks a valid proof")
+        if json.loads(dumps_jsonb(marker)) != marker:
+            raise ValueError("Projection repair requires exact JSONB-safe content")
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT status FROM sessions WHERE id = $1 FOR UPDATE", session_id
+                )
+                if row is None:
+                    raise ValueError("Projection repair session does not exist")
+                previous = await conn.fetch(
+                    "SELECT seq, payload FROM session_event_log "
+                    "WHERE session_id=$1 AND kind=$2 ORDER BY seq",
+                    session_id,
+                    REPAIR_KIND,
+                )
+                for existing in previous:
+                    payload = existing["payload"]
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    if payload == marker:
+                        return existing["seq"]
+                if row["status"] != "stopped":
+                    raise ValueError("Projection repair requires a stopped session")
+                head = await conn.fetchval(
+                    "SELECT COALESCE(MAX(seq), 0) FROM session_event_log WHERE session_id=$1",
+                    session_id,
+                )
+                if head != expected_head:
+                    raise ValueError(
+                        "Projection repair ledger head changed; create a fresh preview"
+                    )
+                seeds = await conn.fetch(
+                    "SELECT payload FROM session_event_log WHERE session_id=$1 "
+                    "AND kind='conversation.turn' AND payload->'turn'->>'id'=ANY($2::text[]) "
+                    "ORDER BY seq",
+                    session_id,
+                    ids,
+                )
+                turns = {}
+                for seed in seeds:
+                    payload = seed["payload"]
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    turn = payload["turn"]
+                    turns.setdefault(turn["id"], turn)
+                if set(turns) != set(ids):
+                    raise ValueError("Projection repair lacks authoritative turn seeds")
+                now = datetime.now(UTC)
+                prior_frames = [
+                    SessionLogEntry(
+                        session_id=session_id,
+                        seq=record["seq"],
+                        kind=REPAIR_KIND,
+                        payload=json.loads(record["payload"])
+                        if isinstance(record["payload"], str)
+                        else record["payload"],
+                        ts=now,
+                    )
+                    for record in previous
+                ]
+                originals = apply_repair_markers(list(turns.values()), prior_frames)
+                entry = SessionLogEntry(
+                    session_id=session_id,
+                    seq=head + 1,
+                    kind=REPAIR_KIND,
+                    payload=marker,
+                    ts=now,
+                )
+                replacements = apply_repair_markers(originals, [entry])
+                expected = {
+                    repair["turn_id"]: repair.get("proof", {}).get("digest") for repair in repairs
+                }
+                if any(
+                    replacement is original
+                    or projection_digest(replacement) != expected[original["id"]]
+                    for original, replacement in zip(originals, replacements, strict=True)
+                ):
+                    raise ValueError("Projection repair failed durable content verification")
+                await conn.execute(_IMPORT_INSERT_SQL, *self._entry_to_args(entry))
+                return entry.seq
 
     async def append(self, entries: list[SessionLogEntry]) -> int:
         if not entries:

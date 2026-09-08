@@ -99,7 +99,9 @@ TOOL_DURATION_MS = "duration_ms"
 # of kinds that simply do not belong on the wire. The reduce/rebuild path STILL
 # reads them as authoritative seeds or snapshot boundaries; only the verbatim
 # wire stream drops them.
-NON_BROADCAST_KINDS: frozenset[str] = frozenset({"conversation.turn", "history_import"})
+NON_BROADCAST_KINDS: frozenset[str] = frozenset(
+    {"conversation.turn", "conversation.projection", "history_import"}
+)
 
 # Per-connect handshake/preamble frames: addressed to ONE freshly-connecting
 # socket, NOT the canonical shared stream (SRD FR-7 / INV-5). On every browser
@@ -201,7 +203,11 @@ class TurnAccumulator:
         self.last_seq = max(self.last_seq, seq)
 
     def is_empty(self) -> bool:
-        return not self.content and not self.parts and not self.reasoning
+        return (
+            not self.content
+            and not self.reasoning
+            and not any(part.get("type") != "text" or part.get("text") for part in self.parts)
+        )
 
     def reset(self) -> None:
         self.content = ""
@@ -288,14 +294,12 @@ def apply_assistant_blocks(
     if not isinstance(content_blocks, list):
         return
     started_at = _stamp_iso(ts)
-    text_parts: list[str] = []
     for block in content_blocks:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        if btype == "text" and block.get("text"):
-            text_parts.append(block["text"])
-            acc.parts.append({"type": "text", "text": block["text"]})
+        if btype == "text" and isinstance(block.get("text"), str):
+            apply_text_message(acc, block)
         elif btype == "thinking" and block.get("thinking"):
             summary = str(block["thinking"])[-_REASONING_TAIL:]
             acc.parts.append({"type": "reasoning", "text": summary})
@@ -331,15 +335,156 @@ def apply_assistant_blocks(
             if block_started:
                 part[TOOL_STARTED_AT] = block_started
             acc.parts.append(part)
-    text_content = "\n".join(text_parts)
-    if text_content:
-        acc.content = f"{acc.content}\n{text_content}" if acc.content else text_content
 
 
-def apply_text_delta(acc: TurnAccumulator, text: str) -> None:
-    """Fold a streaming text delta into ``acc`` (HTTP streaming format)."""
-    if text:
-        acc.content += text
+_TEXT_METADATA = ("phase", "turn_id", "thread_id", "index", "id_source")
+
+
+def _text_identity(frame: dict, block: dict | None = None) -> str | None:
+    value = (block or {}).get("id") or frame.get("item_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _text_metadata(part: dict, source: dict) -> None:
+    for key in _TEXT_METADATA:
+        value = source.get(key)
+        if key == "index":
+            valid = type(value) is int and value >= 0
+        elif key == "phase":
+            valid = value in ("commentary", "final_answer")
+        else:
+            valid = isinstance(value, str) and bool(value)
+        if valid:
+            part[key] = value
+
+
+def _find_text_part(acc: TurnAccumulator, frame: dict) -> dict | None:
+    identity = _text_identity(frame)
+    for part in reversed(acc.parts):
+        if part.get("type") != "text":
+            continue
+        if identity is not None:
+            if part.get("id") != identity:
+                continue
+            if any(
+                frame.get(key) and part.get(key) and frame[key] != part[key]
+                for key in ("turn_id", "thread_id")
+            ):
+                continue
+            return part
+        if part.get("complete") is False and (
+            frame.get("index") is None or frame.get("index") == part.get("index")
+        ):
+            return part
+    return None
+
+
+def _sync_text_content(acc: TurnAccumulator) -> None:
+    """Compatibility prose; exact per-item bytes live in ordered parts.
+
+    Legacy whole-message transcripts keep their historical single-newline join.
+    Identified messages have a paragraph boundary, never a separator per delta.
+    """
+    text = ""
+    previous: dict | None = None
+    for part in acc.parts:
+        value = part.get("text")
+        if part.get("type") != "text" or not isinstance(value, str) or not value:
+            continue
+        if previous is not None:
+            text += "\n\n" if previous.get("id") or part.get("id") else "\n"
+        text += value
+        previous = part
+    acc.content = text
+
+
+def _preserve_legacy_content(acc: TurnAccumulator) -> None:
+    # Older callers/cache seeds can supply aggregate-only prose. Preserve it as
+    # an opaque legacy block; this cannot reconstruct its original chronology.
+    if acc.content and not any(p.get("type") == "text" and p.get("text") for p in acc.parts):
+        acc.parts.append({"type": "text", "text": acc.content})
+
+
+def apply_text_start(acc: TurnAccumulator, frame: dict) -> None:
+    """Reserve the message's first-seen position before tools or later text arrive."""
+    block = frame.get("content_block")
+    if not isinstance(block, dict) or block.get("type") != "text":
+        return
+    if block.get("phase", frame.get("phase")) == "analysis":
+        return
+    identity = _text_identity(frame, block)
+    lookup = {**frame, "item_id": identity}
+    part = _find_text_part(acc, lookup) if identity else None
+    if part is not None and part.get("complete") is True:
+        return  # Replay of an old start cannot reopen a completed message.
+    if part is None:
+        _preserve_legacy_content(acc)
+        part = {
+            "type": "text",
+            "id": identity or f"legacy-text-{len(acc.parts)}",
+            "text": "",
+            "complete": False,
+        }
+        if identity is None:
+            part["id_source"] = "synthetic"
+        acc.parts.append(part)
+    _text_metadata(part, frame)
+    _text_metadata(part, block)
+    if not part["text"] and isinstance(block.get("text"), str) and block["text"]:
+        part["text"] = block["text"]
+        _sync_text_content(acc)
+
+
+def apply_text_delta(acc: TurnAccumulator, text: str, *, frame: dict | None = None) -> None:
+    """Append exact chunk bytes to one open text item, never to the whole turn."""
+    if not isinstance(text, str) or not text:
+        return
+    source = frame or {}
+    if source.get("phase") == "analysis":
+        return
+    part = _find_text_part(acc, source)
+    if part is None:
+        apply_text_start(acc, {**source, "content_block": {"type": "text"}})
+        part = _find_text_part(acc, source)
+    if part is None or part.get("complete") is True:
+        return
+    _text_metadata(part, source)
+    part["text"] += text
+    _sync_text_content(acc)
+
+
+def apply_text_stop(acc: TurnAccumulator, frame: dict) -> None:
+    part = _find_text_part(acc, frame)
+    if part is not None:
+        _text_metadata(part, frame)
+        part["complete"] = True
+
+
+def apply_text_message(acc: TurnAccumulator, block: dict) -> None:
+    """Upsert authoritative full text by item identity without moving its anchor."""
+    if block.get("phase") == "analysis":
+        return
+    text = block.get("text")
+    if not isinstance(text, str):
+        return
+    identity = _text_identity({}, block)
+    if identity is None:
+        if text:
+            _preserve_legacy_content(acc)
+            acc.parts.append({"type": "text", "text": text})
+            _sync_text_content(acc)
+        return
+    source = {**block, "item_id": identity}
+    part = _find_text_part(acc, source)
+    if part is None:
+        apply_text_start(acc, {**source, "content_block": {"type": "text", "id": identity}})
+        part = _find_text_part(acc, source)
+    if part is None or (part.get("complete") is True and block.get("complete") is False):
+        return
+    _text_metadata(part, block)
+    part["text"] = text
+    part["complete"] = block.get("complete") is not False
+    _sync_text_content(acc)
 
 
 def apply_thinking_delta(acc: TurnAccumulator, thinking: str) -> None:
@@ -436,7 +581,8 @@ def apply_result_content(acc: TurnAccumulator, payload: dict) -> None:
                 break
     if not text and _result_status(payload) == "error":
         text = _result_error_text(payload)
-    acc.content = text
+    if text:
+        apply_text_message(acc, {"type": "text", "text": text})
 
 
 # --------------------------------------------------------------------------- turn builders
@@ -446,7 +592,7 @@ def finalize_parts(acc: TurnAccumulator) -> list[dict]:
     """The turn's parts at flush time: accumulated parts plus a trailing reasoning summary
     (reasoning is appended AT FLUSH on both paths — this fixes the old ordering divergence).
     """
-    parts = list(acc.parts)
+    parts = [part for part in acc.parts if part.get("type") != "text" or part.get("text")]
     if acc.reasoning:
         parts.append({"type": "reasoning", "text": acc.reasoning[-_REASONING_TAIL:]})
     return parts
@@ -608,7 +754,9 @@ _CONVERSATIONAL_KINDS = frozenset(
         "user",
         "user_confirmed",
         "assistant",
+        "content_block_start",
         "content_block_delta",
+        "content_block_stop",
         "result",
         "error",
         "terminal_frame",
@@ -653,6 +801,11 @@ def reduce_frames(
 
     acc = TurnAccumulator()
     imported_prefix_open = False
+    # A terminal pane keeps repainting after a result. Public replay has no
+    # conversation.turn seed to suppress that idle scrollback, so a completed
+    # span stays closed until a new human turn or assistant activity opens it.
+    # Initial/raw-only history still admits the last-resort pane fallback.
+    terminal_span_closed = False
     # turn_id -> (seq, steering_state): the delivery-state transitions seen in the log, applied
     # onto the matching user turns at the end (last-writer-wins by seq, == the live path).
     steering: dict[str, tuple[int, str]] = {}
@@ -703,29 +856,46 @@ def reduce_frames(
             # frames flush that span first and carry their own provenance below.
             if is_imported and _user_string_content(p) is None:
                 acc.native_import = acc.native_import or dict(metadata["native_import"])
-            _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, k, p, flush)
+            if _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, k, p, flush):
+                terminal_span_closed = False
             continue
 
         if is_imported:
             acc.native_import = acc.native_import or dict(metadata["native_import"])
 
         if k == "assistant":
+            terminal_span_closed = False
             # D1: the frame's durable ts IS the tool_use start stamp — the same instant the
             # live broker passes here as it enqueues the frame, so both planes agree exactly.
             apply_assistant_blocks(acc, _content_blocks(p), ts=ts)
             acc.touch(ts, seq)
             continue
 
+        if k == "content_block_start":
+            terminal_span_closed = False
+            apply_text_start(acc, p)
+            acc.touch(ts, seq)
+            continue
+
+        if k == "content_block_stop":
+            apply_text_stop(acc, p)
+            acc.touch(ts, seq)
+            continue
+
         if k == "content_block_delta":
             delta = p.get("delta", {}) if isinstance(p.get("delta"), dict) else {}
+            if delta.get("text") or delta.get("thinking"):
+                terminal_span_closed = False
             if delta.get("type") == "thinking_delta":
                 apply_thinking_delta(acc, delta.get("thinking", ""))
             else:
-                apply_text_delta(acc, delta.get("text", ""))
+                apply_text_delta(acc, delta.get("text", ""), frame=p)
             acc.touch(ts, seq)
             continue
 
         if k in ("terminal_frame", "terminal_snapshot"):
+            if terminal_span_closed:
+                continue
             rows_text = p.get("rows")
             if not isinstance(rows_text, list):
                 rows_text = str(p.get("text", "")).split("\n")
@@ -737,12 +907,14 @@ def reduce_frames(
             apply_result_content(acc, p)
             acc.touch(ts, seq)
             flush(md=result_metadata(p))
+            terminal_span_closed = True
             continue
 
         if k == "error":
             flush()
             acc.touch(ts, seq)
             turns.append(build_error_turn(session_id, seq, _error_text(p), ts))
+            terminal_span_closed = True
             continue
 
     if not acc.is_empty() or acc.pending_tmux_rows is not None:
@@ -794,12 +966,13 @@ def _apply_steering_states(
         turn.setdefault("metadata", {})["steering_state"] = resolved[1]
 
 
-def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, flush) -> None:
+def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, flush) -> bool:
     """Fold a ``user`` or ``user_confirmed`` frame.
 
     Epic-A carry-over: ONE human message is durably written as BOTH a ``user`` frame (string
     content, ``uuid``) AND a ``user_confirmed`` broker frame (``id`` + ``content``). They share
     the id/content, so dedup on that id and emit a single user turn — never a doubled turn.
+    Return whether a new human turn was added; a replayed confirmation cannot reopen an idle pane.
     """
     content = _user_string_content(payload) if kind == "user" else _confirmed_content(payload)
     if content is None:
@@ -807,10 +980,10 @@ def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, 
             # D1: the frame's durable ts IS the tool_result end stamp (see the assistant branch).
             apply_tool_result_blocks(acc, _tool_result_blocks(payload), ts=ts)
             acc.touch(ts, seq)
-        return
+        return False
     uid = _user_id(payload, kind)
     if uid and uid in seen_ids:
-        return  # already emitted (seed double-log, or the user/user_confirmed pair)
+        return False  # already emitted (seed double-log, or the user/user_confirmed pair)
     flush()
     if uid:
         seen_ids.add(uid)
@@ -823,6 +996,7 @@ def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, 
     turns.append(
         build_user_turn(session_id, seq, content, turn_id=uid or None, ts=ts, metadata=metadata)
     )
+    return True
 
 
 def _turn_dict(

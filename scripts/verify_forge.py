@@ -29,6 +29,7 @@ UNIT_PATHS = [
     "tests/test_scripts/test_verify_forge.py",
     "tests/test_scripts/test_forge_live.py",
     "tests/test_scripts/test_forge_corpus.py",
+    "tests/test_scripts/test_forge_text_projection.py",
     "tests/test_niuu/test_forge_replay_facade.py",
     "tests/test_niuu/test_transcript_result_failures.py",
     "tests/test_niuu/test_rest_volundr.py",

@@ -138,9 +138,9 @@
     {
       "after_seq": 731,
       "event_type": "result",
-      "turn_count": 4,
+      "turn_count": 3,
       "partial": false,
-      "turns_sha256": "e78b39f3697b658baf22a5ab82048ac10a2c8d535d6433a0877828862ed1892e"
+      "turns_sha256": "754ea0a267d1c7e5c762342ea741f90c935bc754373cd6389375fc0ae1acea5d"
     }
   ],
   "expected_turns": [
@@ -167,17 +167,6 @@
         "cost": null,
         "model": "claude-opus-5",
         "stop_reason": "stop"
-      },
-      "visibility": "public"
-    },
-    {
-      "id": "719dad7f-d4a4-54ab-b8bc-4b55980fd40c",
-      "role": "assistant",
-      "content": "str, numbers to int/float, and true/false/null to\n  True/False/None. It is identical to json.load() except\n  that it takes a string/bytes instead of a file-like\n  object, and it raises JSONDecodeError (a ValueError\n  subclass) if the input is not valid JSON.\n\n  Official docs: https://docs.python.org/3/library/json.html\n\n  Sources:\n  - json — JSON encoder and decoder — Python 3.14.7\n    documentation\n\n  [FORGE_DONE:2398316bd5284a58b305176f452f76f6:search]\n\n✻ Brewed for 34s · done 4:44 PM\n\n❯ Use your native agent delegation tool to spawn exactly\n  two bounded worker agents, concurrently if supported. One\n  must independently read numbers.json and calculate its\n  sum. The other must inspect answer.json and check whether\n  it matches numbers.json. Workers must stay in this\n  workspace and perform read-only work. Wait for both\n  workers, collect their findings, and report agreement or\n  disagreement. Do not simulate agents in prose or shell\n  subprocesses. Use native Task/Agent/spawn_agent\n  facilities.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response:\n  [FORGE_DONE:cf5144dc2fef40c1b58b9b2491dc96de:agents].\n  Never put this marker in worker instructions or interim\n  updates. It identifies completion of this request only.\n\n● 2 background agents launched (↓ to manage)\n\n● Both workers are running: sum-worker (independent sum) and\n  verify-worker (answer.json cross-check). Waiting for both\n  to finish.\n\n› Message from @sum-worker (ctrl+o to expand)\n\n● sum-worker reported: [8, 13, 21], 3 numbers, sum = 42.\n  Still waiting on verify-worker.\n\n● Teammate @sum-worker finished\n  Reported to team-lead.…\n\n● sum-worker is idle and done. Still waiting on\n  verify-worker.\n\n› Message from @verify-worker (ctrl+o to expand)\n\n● Both workers finished. They agree.\n\n  sum-worker (never opened answer.json)\n  - numbers.json = [8, 13, 21], 3 values\n  - Computed with python3: sum = 42\n\n  verify-worker (cross-checked both files)\n  - (a) answer.json parses as valid JSON — PASS\n  - (b) object with exactly one key, \"sum\" — PASS\n  - (c) value is a number (int 42), not a string — PASS\n  - (d) value equals sum of numbers.json (42 == 42) — PASS\n  - Verdict: MATCH\n\n  Agreement: both independently arrived at 42, matching the\n  FORGE_SUM=42 I computed earlier and the contents of\n  answer.json. No disagreement. Both stayed read-only inside\n  the workspace — no writes, no git, no network.\n\n  [FORGE_DONE:cf5144dc2fef40c1b58b9b2491dc96de:agents]\n\n● Teammate @verify-worker finished\n  Report sent to team-lead. Summary:…\n\n● That's verify-worker signing off idle — same MATCH verdict\n  already reported. Both workers are now finished and idle;\n  nothing further to do.\n\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for a…\n                                                       /rc\n\n  ● main\n  ◯ sum-worker     Read-only task, stay strictly insi… 32s\n  ◯ verify-worker  Read-only task, stay strictly insi… 28s",
-      "parts": [],
-      "created_at": "2026-09-07T16:44:59.710106+00:00",
-      "metadata": {
-        "provenance": "terminal_scrape"
       },
       "visibility": "public"
     },
@@ -255,21 +244,9 @@
         "stop_reason": "stop"
       },
       "visibility": "public"
-    },
-    {
-      "id": "91e27f60-ee7e-5b8a-805d-bb4385c0a96f",
-      "role": "assistant",
-      "content": "● sum-worker is idle and done. Still waiting on\n  verify-worker.\n\n› Message from @verify-worker (ctrl+o to expand)\n\n● Both workers finished. They agree.\n\n  sum-worker (never opened answer.json)\n  - numbers.json = [8, 13, 21], 3 values\n  - Computed with python3: sum = 42\n\n  verify-worker (cross-checked both files)\n  - (a) answer.json parses as valid JSON — PASS\n  - (b) object with exactly one key, \"sum\" — PASS\n  - (c) value is a number (int 42), not a string — PASS\n  - (d) value equals sum of numbers.json (42 == 42) — PASS\n  - Verdict: MATCH\n\n  Agreement: both independently arrived at 42, matching the\n  FORGE_SUM=42 I computed earlier and the contents of\n  answer.json. No disagreement. Both stayed read-only inside\n  the workspace — no writes, no git, no network.\n\n  [FORGE_DONE:cf5144dc2fef40c1b58b9b2491dc96de:agents]\n\n● Teammate @verify-worker finished\n  Report sent to team-lead. Summary:…\n\n● That's verify-worker signing off idle — same MATCH verdict\n  already reported. Both workers are now finished and idle;\n  nothing further to do.\n\n❯ Exercise a harmless tool failure and recovery. First run\n  python3 -c 'import sys; print(\"FORGE_EXPECTED_FAILURE\");\n  sys.exit(7)' as its own command. Observe the failed tool\n  result, then run a separate successful command that\n  prints FORGE_RECOVERED. Do not hide the first exit status\n  with a shell fallback. Explain that the failure was\n  intentional.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response:\n  [FORGE_DONE:cffd34aaf84643fe9d03fb671f99e421:recovery].\n  Never put this marker in worker instructions or interim\n  updates. It identifies completion of this request only.\n\n● Bash(python3 -c 'import sys;\n      print(\"FORGE_EXPECTED_FAILURE\"); sys.exit(7)')\n  ⎿  Error: Exit code 7\n     FORGE_EXPECTED_FAILURE\n\n● Bash(echo FORGE_RECOVERED)\n  ⎿  FORGE_RECOVERED\n\n● Both steps ran as separate commands, with no || true or\n  other fallback masking the status.\n\n  1. Intentional failure — python3 -c 'import sys;\n     print(\"FORGE_EXPECTED_FAILURE\"); sys.exit(7)' printed\n     FORGE_EXPECTED_FAILURE and returned exit code 7,\n     surfaced to me as a failed tool result.\n  2. Recovery — a separate echo FORGE_RECOVERED succeeded\n     with exit code 0, printing FORGE_RECOVERED.\n\n  The first failure was deliberate: you asked for a harmless\n  non-zero exit so the error path could be observed.\n  Nothing is broken in the workspace — sys.exit(7) is the\n  script's own chosen status, not a tool or environment\n  fault, and the following command ran normally.\n\n  Unrelated note: the paper MCP server failed to connect\n  this session (CONNECT_TIMEOUT — version negotiation probe\n  timed out after 5000ms). It didn't affect this task, but\n  it's a connection failure worth retrying if you need it.\n\n  [FORGE_DONE:cffd34aaf84643fe9d03fb671f99e421:recovery]\n\n❯ Retry the paper MCP server connection\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for a…\n                                                       /rc\n\n  ● main\n  ◯ sum-worker     Read-only task, stay strictly insi… 43s\n  ◯ verify-worker  Read-only task, stay strictly insi… 39s",
-      "parts": [],
-      "created_at": "2026-09-07T16:45:10.903958+00:00",
-      "metadata": {
-        "provenance": "terminal_scrape",
-        "status": "interrupted"
-      },
-      "visibility": "public"
     }
   ],
-  "expected_partial": true,
+  "expected_partial": false,
   "source_run": {
     "run_id": "claude-tmux-ad948830dc",
     "session_id": "aba314d5-aafe-4487-afd1-b8306e121e6e",
@@ -333,5 +310,36 @@
       "terminal_prompt_submitted": 1,
       "user_active": 1
     }
+  },
+  "projection_review": {
+    "status": "accepted",
+    "reviewer": "Codex transport/corpus review agent, 2026-09-08",
+    "source_frames_sha256": "708373ae9812297aa203651e770a16f80d7eda5fa839f346c49e39864e3074bc",
+    "previous_projection_sha256": "483542c212b214433c8770dea1003a9f0e338a058aca939cbf5e0e2bf3f00f2b",
+    "projection_sha256": "754ea0a267d1c7e5c762342ea741f90c935bc754373cd6389375fc0ae1acea5d",
+    "reason": "Remove only verified idle terminal scrollback after a completed result. These paints created phantom assistant turns at EOF or the next human boundary; genuine terminal-only work remains supported.",
+    "all_real_turns_byte_identical": true,
+    "removed_phantom_turns": [
+      {
+        "turn_id": "719dad7f-d4a4-54ab-b8bc-4b55980fd40c",
+        "prior_result_seq": 667,
+        "idle_terminal_seq": 669,
+        "old_metadata": {
+          "provenance": "terminal_scrape"
+        },
+        "old_text_sha256": "56b8338869fbc3bc01843e2b316fadddaa4b9e5895ad43f6ed937c0e7b1d6c75"
+      },
+      {
+        "turn_id": "91e27f60-ee7e-5b8a-805d-bb4385c0a96f",
+        "prior_result_seq": 731,
+        "idle_terminal_seq": 736,
+        "old_metadata": {
+          "provenance": "terminal_scrape",
+          "status": "interrupted"
+        },
+        "old_text_sha256": "239c9be93e687f1e1dea3f280966702f2e372acb2685139b1148ee04bf681e96"
+      }
+    ],
+    "reducer_source_sha256": "33f1782405903e2e6b152a3435d36db95c6b2696e3675d67c72e15ed9083317d"
   }
 }

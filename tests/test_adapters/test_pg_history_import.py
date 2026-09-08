@@ -12,6 +12,8 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from niuu.domain.text_projection import repair_legacy_turn, repair_marker
+from tests.test_domain.test_text_projection_repair import captured
 from volundr.adapters.outbound.pg_session_event_log import _INSERT_SQL, PostgresSessionEventLog
 from volundr.domain.history_import import (
     HistoryImportConflictError,
@@ -19,6 +21,7 @@ from volundr.domain.history_import import (
     HistoryImportValidationError,
 )
 from volundr.domain.models import SessionLogEntry
+from volundr.domain.services.transcript_rebuild import rebuild_turns
 
 _NATIVE_TS = datetime(2026, 9, 8, 7, 43, 4, tzinfo=UTC)
 _SOURCE = "codex-native:original-thread"
@@ -276,6 +279,77 @@ async def real_history_pool():
             await pool.close()
         await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
         await admin.close()
+
+
+@pytest.mark.parametrize("status", ["running", "starting", "stopping", "failed", "created"])
+async def test_projection_repair_refuses_every_nonstopped_status(status):
+    _, original, candidate = captured()
+    marker = repair_marker([repair_legacy_turn(original, candidate, source_head=9)])
+    repo, conn = _repository(status)
+    with pytest.raises(ValueError, match="stopped session"):
+        await repo.append_projection_repair(uuid4(), marker, expected_head=10)
+    conn.execute.assert_not_awaited()
+
+
+async def test_projection_repair_refuses_changed_head_before_reading_or_writing_seeds():
+    _, original, candidate = captured()
+    marker = repair_marker([repair_legacy_turn(original, candidate, source_head=9)])
+    repo, conn = _repository("stopped", head=11)
+    with pytest.raises(ValueError, match="head changed"):
+        await repo.append_projection_repair(uuid4(), marker, expected_head=10)
+    conn.execute.assert_not_awaited()
+    assert conn.fetch.await_count == 1
+
+
+async def test_projection_repair_rejects_scrubbing_that_would_invalidate_its_proof():
+    _, original, candidate = captured()
+    candidate["parts"][0]["id"] = "native\x00message"
+    marker = repair_marker([repair_legacy_turn(original, candidate, source_head=9)])
+    repo, conn = _repository("stopped", head=10)
+    with pytest.raises(ValueError, match="exact JSONB-safe content"):
+        await repo.append_projection_repair(uuid4(), marker, expected_head=10)
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.integration
+async def test_real_projection_repair_preserves_raw_prefix_and_cold_rebuild(real_history_pool):
+    pool = real_history_pool
+    sid = uuid4()
+    await pool.execute("INSERT INTO sessions VALUES ($1, 'stopped')", sid)
+    repo = PostgresSessionEventLog(pool)
+    frames, original, candidate = captured()
+    raw = [_entry(sid, seq=frame.seq, kind=frame.kind, payload=frame.payload) for frame in frames]
+    raw.append(_entry(sid, seq=10, kind="conversation.turn", payload={"turn": original}))
+    await repo.append(raw)
+    before = await repo.read_after(sid)
+    replacement = repair_legacy_turn(original, candidate, source_head=9)
+    marker = repair_marker([replacement])
+    assert await repo.append_projection_repair(sid, marker, expected_head=10) == 11
+    after = await repo.read_after(sid)
+    assert after[:-1] == before
+    assert after[-1].payload == marker
+    assert rebuild_turns(after).turns == [replacement]
+    # An exact retry is harmless even after normal runtime resumes/appends.
+    await pool.execute("UPDATE sessions SET status='running' WHERE id=$1", sid)
+    await repo.append([_entry(sid, seq=12, kind="system", payload={"type": "system"})])
+    assert await repo.append_projection_repair(sid, marker, expected_head=10) == 11
+    assert await repo.latest_seq(sid) == 12
+
+
+@pytest.mark.integration
+async def test_real_projection_repair_rejects_invalid_proof_atomically(real_history_pool):
+    pool = real_history_pool
+    sid = uuid4()
+    await pool.execute("INSERT INTO sessions VALUES ($1, 'stopped')", sid)
+    repo = PostgresSessionEventLog(pool)
+    _, original, candidate = captured()
+    await repo.append([_entry(sid, seq=1, kind="conversation.turn", payload={"turn": original})])
+    before = await repo.read_after(sid)
+    marker = repair_marker([repair_legacy_turn(original, candidate, source_head=1)])
+    marker["repairs"][0]["parts"][0]["text"] += "corruption"
+    with pytest.raises(ValueError, match="content verification"):
+        await repo.append_projection_repair(sid, marker, expected_head=1)
+    assert await repo.read_after(sid) == before
 
 
 @pytest.mark.integration

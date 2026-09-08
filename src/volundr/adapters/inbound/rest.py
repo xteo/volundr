@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Res
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from niuu.domain.text_projection import projection_revision
 from skuld.conversation_shallow import SHALLOW_DETAIL, elide_turns, is_elided_input
 from skuld.tool_result_preview import (
     PreviewCache,
@@ -2861,6 +2862,11 @@ def create_router(
             if not isinstance(payload, dict) or not isinstance(payload.get("turns"), list):
                 return payload
             all_turns = payload["turns"]
+            # Compute over the complete prefix BEFORE pagination/shallow elision.
+            payload = {
+                **payload,
+                "projection_revision": projection_revision(all_turns),
+            }
             total = len(all_turns)
             if after >= 0:
                 # P2 incremental window: everything past the client's cached prefix. An `after`

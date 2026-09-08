@@ -285,7 +285,14 @@ async def test_parity_full_turn_text_reasoning_tools_user_and_result(tmp_path):
     assert "usage" in asst_meta
     # parts order is identical on both paths: the assistant frame's blocks (reasoning, then
     # tool_use) first, then the tool_result enriching the open turn.
-    assert [p["type"] for p in live[1]["parts"]] == ["reasoning", "tool_use", "tool_result"]
+    assert [p["type"] for p in live[1]["parts"]] == ["reasoning", "tool_use", "tool_result", "text"]
+    assert live[1]["parts"][-1] == {
+        "type": "text",
+        "text": "Hello world",
+        "id": "legacy-text-3",
+        "id_source": "synthetic",
+        "complete": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -610,6 +617,7 @@ async def test_parity_pre_d1_log_without_frame_ts_rebuilds_untimed(tmp_path):
     assert assistant["parts"] == [
         {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": False},
+        {"type": "text", "text": "done"},
     ]
 
 

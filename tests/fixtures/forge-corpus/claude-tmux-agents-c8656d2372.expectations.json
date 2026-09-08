@@ -285,9 +285,9 @@
     {
       "after_seq": 540,
       "event_type": "agent_update",
-      "turn_count": 4,
-      "partial": true,
-      "turns_sha256": "f95bf98065acba02da9b006bc6fc5119ea8823ddb7dce36fb57ac451a2ba3d33"
+      "turn_count": 3,
+      "partial": false,
+      "turns_sha256": "615db0d1d6e7b870d86e26f1b59cbbbbd388acfb1b4a9f0d858932a318952815"
     },
     {
       "after_seq": 562,
@@ -646,21 +646,9 @@
         "stop_reason": "stop"
       },
       "visibility": "public"
-    },
-    {
-      "id": "1b5b1cd4-660c-5a12-9635-107dd983eeca",
-      "role": "assistant",
-      "content": "str, numbers to int/float, and true/false/null to\n  True/False/None. It is identical to json.load() except\n  that it takes a string/bytes instead of a file-like\n  object, and it raises JSONDecodeError (a ValueError\n  subclass) if the input is not valid JSON.\n\n  Official docs: https://docs.python.org/3/library/json.html\n\n  Sources:\n  - json — JSON encoder and decoder — Python 3.14.7\n    documentation\n\n  [FORGE_DONE:2398316bd5284a58b305176f452f76f6:search]\n\n✻ Brewed for 34s · done 4:44 PM\n\n❯ Use your native agent delegation tool to spawn exactly\n  two bounded worker agents, concurrently if supported. One\n  must independently read numbers.json and calculate its\n  sum. The other must inspect answer.json and check whether\n  it matches numbers.json. Workers must stay in this\n  workspace and perform read-only work. Wait for both\n  workers, collect their findings, and report agreement or\n  disagreement. Do not simulate agents in prose or shell\n  subprocesses. Use native Task/Agent/spawn_agent\n  facilities.\n\n  Acceptance controller: after all requested work and all\n  workers have finished (or you have explained an\n  unavailable capability), append this exact completion\n  marker to your final response:\n  [FORGE_DONE:cf5144dc2fef40c1b58b9b2491dc96de:agents].\n  Never put this marker in worker instructions or interim\n  updates. It identifies completion of this request only.\n\n● 2 background agents launched (↓ to manage)\n\n● Both workers are running: sum-worker (independent sum) and\n  verify-worker (answer.json cross-check). Waiting for both\n  to finish.\n\n› Message from @sum-worker (ctrl+o to expand)\n\n● sum-worker reported: [8, 13, 21], 3 numbers, sum = 42.\n  Still waiting on verify-worker.\n\n● Teammate @sum-worker finished\n  Reported to team-lead.…\n\n● sum-worker is idle and done. Still waiting on\n  verify-worker.\n\n› Message from @verify-worker (ctrl+o to expand)\n\n● Both workers finished. They agree.\n\n  sum-worker (never opened answer.json)\n  - numbers.json = [8, 13, 21], 3 values\n  - Computed with python3: sum = 42\n\n  verify-worker (cross-checked both files)\n  - (a) answer.json parses as valid JSON — PASS\n  - (b) object with exactly one key, \"sum\" — PASS\n  - (c) value is a number (int 42), not a string — PASS\n  - (d) value equals sum of numbers.json (42 == 42) — PASS\n  - Verdict: MATCH\n\n  Agreement: both independently arrived at 42, matching the\n  FORGE_SUM=42 I computed earlier and the contents of\n  answer.json. No disagreement. Both stayed read-only inside\n  the workspace — no writes, no git, no network.\n\n  [FORGE_DONE:cf5144dc2fef40c1b58b9b2491dc96de:agents]\n\n● Teammate @verify-worker finished\n  Report sent to team-lead. Summary:…\n\n✽ Working… (1s · ↓ 1 tokens)\n  ⎿  Tip: Try setting environment variable\n     COLORTERM=truecolor for richer colors\n\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to …\n                                                       /rc\n\n  ● main\n  ◯ sum-worker     Read-only task, stay strictly insi… 32s\n  ◯ verify-worker  Read-only task, stay strictly insi… 28s",
-      "parts": [],
-      "created_at": "2026-09-07T16:44:59.509950+00:00",
-      "metadata": {
-        "provenance": "terminal_scrape",
-        "status": "interrupted"
-      },
-      "visibility": "public"
     }
   ],
-  "expected_partial": true,
+  "expected_partial": false,
   "source_run": {
     "run_id": "claude-tmux-ad948830dc",
     "session_id": "aba314d5-aafe-4487-afd1-b8306e121e6e",
@@ -874,5 +862,27 @@
       "result": 4,
       "agent_update": 2
     }
+  },
+  "projection_review": {
+    "status": "accepted",
+    "reviewer": "Codex transport/corpus review agent, 2026-09-08",
+    "source_frames_sha256": "c8656d237264c37620ae91cfb530f26b39cf0141665cd9bb05d268b3740538e0",
+    "previous_projection_sha256": "28f6f1b715f3ab8dd6ffdedcb6178e8ac060dc6cf06391b16e7678f3a6c6376a",
+    "projection_sha256": "fd7b7502478a35eed6861edfe147344624c65efa767c856d330593bb58156cc4",
+    "reason": "Remove only verified idle terminal scrollback after a completed result. These paints created phantom assistant turns at EOF or the next human boundary; genuine terminal-only work remains supported.",
+    "all_real_turns_byte_identical": true,
+    "removed_phantom_turns": [
+      {
+        "turn_id": "1b5b1cd4-660c-5a12-9635-107dd983eeca",
+        "prior_result_seq": 653,
+        "idle_terminal_seq": 663,
+        "old_metadata": {
+          "provenance": "terminal_scrape",
+          "status": "interrupted"
+        },
+        "old_text_sha256": "768f65a9187d556f96a94023bf8693bca629dec1cbfc68c5a81ce825e25f57ad"
+      }
+    ],
+    "reducer_source_sha256": "33f1782405903e2e6b152a3435d36db95c6b2696e3675d67c72e15ed9083317d"
   }
 }

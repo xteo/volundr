@@ -183,6 +183,14 @@
           "content": "FORGE_SUM=42\n{\"sum\": 42}\n",
           "is_error": false,
           "ended_at": "2026-09-07T16:55:26.981635+00:00"
+        },
+        {
+          "type": "text",
+          "id": "legacy-text-4",
+          "text": "FORGE_SUM=42. Wrote and read back `answer.json`: `{\"sum\": 42}`.\n\n[FORGE_DONE:c742b759e60b4dbcb988600eb6346054:workspace]",
+          "complete": true,
+          "id_source": "synthetic",
+          "index": 4
         }
       ],
       "created_at": "2026-09-07T16:55:32.380090+00:00",
@@ -264,5 +272,18 @@
       "message_delta": 3,
       "result": 1
     }
+  },
+  "projection_review": {
+    "schema_version": 1,
+    "status": "accepted",
+    "reviewer": "Codex integration review, 2026-09-08",
+    "source_frames_sha256": "f7572f15f783a90947104c8fb2ae25ee7f97e8168c5e49af234601fc63004772",
+    "previous_projection_sha256": "1d3c995bef00b7bf0d68d7944fcfb86058ad36e7a597f6e50c2e89e67fb7491e",
+    "projection_sha256": "4d772fd2a5512c19ab92fd5e167f6eba0be7d9e54ec8718c64f37e466ad898c2",
+    "notes": [
+      "Captured final text deltas now produce one ordered text part after the tool burst.",
+      "Exact final prose, every nontext part, turn identity and accounting unchanged.",
+      "Original raw frames and original capture review remain unchanged."
+    ]
   }
 }

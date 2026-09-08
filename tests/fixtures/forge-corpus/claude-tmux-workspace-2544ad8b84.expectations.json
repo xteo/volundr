@@ -253,21 +253,9 @@
         "stop_reason": "stop"
       },
       "visibility": "public"
-    },
-    {
-      "id": "b8c936f9-cc74-5775-a2a3-28d393a39b0c",
-      "role": "assistant",
-      "content": "▐▛███▛█   Claude Code v2.1.263\n▝▜██████▀  Opus 5 with xhigh effort · Claude Max\n  ▝▝ ▝▝    ~/forge-live-workspaces/claude-tmux-ad948830dc\n\n⚠ 1 MCP server needs authentication · run /mcp\n\n❯ Read TASK.md and numbers.json using tools. Use a command to calculate the sum of the numbers; print FORGE_SUM=<sum>. Write answer.json containing exactly an object with key sum and that numeric\n  value. Read the file back with a tool. Actually execute these actions, then briefly report the result.\n\n  Acceptance controller: after all requested work and all workers have finished (or you have explained an unavailable capability), append this exact completion marker to your final response:\n  [FORGE_DONE:78f9c2ecd1c24a5d8c7420f32940a591:workspace]. Never put this marker in worker instructions or interim updates. It identifies completion of this request only.\n\n  /remote-control is active · Continue here, on your phone, or at https://claude.ai/code/session_fixture\n\n  Read 1 file (ctrl+o to expand)\n\n● Bash(SUM=$(python3 -c 'import json;print(sum(json.load(open(\"numbers.json\"))))') && echo \"FORGE_SUM=$SUM\" && printf '{\"sum\": %s}\\n' \"$SUM\" > answer.json)\n  ⎿  FORGE_SUM=42\n\n  Read 1 file (ctrl+o to expand)\n\n● Done.\n\n  - TASK.md — the Forge acceptance workspace notice (synthetic data only; keep files here; no publishing/committing).\n  - numbers.json — [8, 13, 21]\n  - Computed via python3: FORGE_SUM=42\n  - Wrote answer.json and read it back: {\"sum\": 42}\n\n  [FORGE_DONE:78f9c2ecd1c24a5d8c7420f32940a591:workspace]\n\n✻ Cooked for 11s · done 4:43 PM\n\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                                    tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking\n                                                                                                                                                                                                   /rc",
-      "parts": [],
-      "created_at": "2026-09-07T16:43:42.699898+00:00",
-      "metadata": {
-        "provenance": "terminal_scrape",
-        "status": "interrupted"
-      },
-      "visibility": "public"
     }
   ],
-  "expected_partial": true,
+  "expected_partial": false,
   "source_run": {
     "run_id": "claude-tmux-ad948830dc",
     "session_id": "aba314d5-aafe-4487-afd1-b8306e121e6e",
@@ -346,5 +334,27 @@
       "assistant": 4,
       "result": 1
     }
+  },
+  "projection_review": {
+    "status": "accepted",
+    "reviewer": "Codex transport/corpus review agent, 2026-09-08",
+    "source_frames_sha256": "2544ad8b848178f9f389c2e6d12739e4081b70cd03bf41a6c10c5de90e685211",
+    "previous_projection_sha256": "25f9ad6f536dfe634ac89486af81e476bd5cbd5a84f643a4d85fba9bbc8ca42d",
+    "projection_sha256": "c687e169f7b6832235f9daf84f84b4d27352af9daf6717f4ddd43ad8de01ec8e",
+    "reason": "Remove only verified idle terminal scrollback after a completed result. These paints created phantom assistant turns at EOF or the next human boundary; genuine terminal-only work remains supported.",
+    "all_real_turns_byte_identical": true,
+    "removed_phantom_turns": [
+      {
+        "turn_id": "b8c936f9-cc74-5775-a2a3-28d393a39b0c",
+        "prior_result_seq": 100,
+        "idle_terminal_seq": 102,
+        "old_metadata": {
+          "provenance": "terminal_scrape",
+          "status": "interrupted"
+        },
+        "old_text_sha256": "5c313f45fedf6f0d459252f71bdcf392444ce25fa035670ac2dd95318306d6e8"
+      }
+    ],
+    "reducer_source_sha256": "33f1782405903e2e6b152a3435d36db95c6b2696e3675d67c72e15ed9083317d"
   }
 }

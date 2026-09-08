@@ -35,6 +35,7 @@ from skuld.agent_usage import AgentUsageTracker
 from skuld.control_errors import ControlRecoveryError
 from skuld.delivery_errors import DeliveryNotAcceptedError
 from skuld.transports.claude_env import claude_spawn_env
+from skuld.transports.claude_text_order import preceding_tool_text
 from skuld.transports.mcp_config import build_claude_mcp_config
 from skuld.transports.subprocess import _DEFAULT_PERMISSION_MODE
 from skuld.transports.tool_shims import ensure_codex_tool_shims
@@ -361,6 +362,11 @@ class TmuxInteractiveTransport(CLITransport):
         # the Stop-hook final-message twin guard) + per-message flush accumulators.
         self._turn_displayed_texts: list[str] = []
         self._display_msg_buffers: dict[str, str] = {}
+        self._text_hook_lock = asyncio.Lock()
+        self._displayed_message_ids: set[str] = set()
+        self._native_pretool_text_ids: set[tuple[str, int]] = set()
+        self._pending_native_display_texts: list[str] = []
+        self._unmatched_display_texts: list[str] = []
         # Correlation FIFO of (msg_id, request_id, normalized_text) for each user
         # message pasted into the pane but not yet seen consumed by Claude. A steered
         # message lands in the CLI's own input queue and is inserted "at the right
@@ -851,6 +857,7 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_last_clean_text = ""
         self._turn_displayed_texts = []
         self._display_msg_buffers = {}
+        self._reset_text_identity_tracking()
         self._turn_prompt_text = ""
         # The watchdog captures the `_turn_done` Event it was started with. A fresh
         # turn always gets a freshly-created Event (above), so we MUST bind a live
@@ -1033,8 +1040,10 @@ class TmuxInteractiveTransport(CLITransport):
             return True
 
         if event_name == "PreToolUse":
-            self._mark_semantic_turn_started()
-            await self._emit_tool_use_from_hook(payload)
+            async with self._text_hook_lock:
+                self._mark_semantic_turn_started()
+                await self._emit_native_text_before_tool(payload)
+                await self._emit_tool_use_from_hook(payload)
             return True
 
         if event_name in {"PostToolUse", "PostToolUseFailure"}:
@@ -1049,7 +1058,8 @@ class TmuxInteractiveTransport(CLITransport):
             return True
 
         if event_name == "MessageDisplay":
-            await self._emit_message_display_from_hook(payload)
+            async with self._text_hook_lock:
+                await self._emit_message_display_from_hook(payload)
             return True
 
         if event_name == "SubagentStart":
@@ -1125,6 +1135,65 @@ class TmuxInteractiveTransport(CLITransport):
         self._turn_last_clean_text = ""
         self._turn_displayed_texts = []
         self._display_msg_buffers = {}
+        self._reset_text_identity_tracking()
+
+    def _reset_text_identity_tracking(self) -> None:
+        self._displayed_message_ids.clear()
+        self._native_pretool_text_ids.clear()
+        self._pending_native_display_texts.clear()
+        self._unmatched_display_texts.clear()
+
+    async def _emit_native_text_before_tool(self, payload: dict[str, Any]) -> None:
+        if self._is_child_hook(payload) or (
+            self._active_subagent_stack and payload.get("tool_name") != "Task"
+        ):
+            return
+        anchor = self._question_native_identity(payload)
+        if not anchor.get("transcript_path"):
+            return
+        # Claude can POST PreToolUse before its asynchronous JSONL write is
+        # visible. Wait only for the exact native tool proof, bounded to 100 ms;
+        # no text (or a writer depending on hook return) falls back to captured
+        # hook order without blocking the native tool indefinitely.
+        try:
+            async with asyncio.timeout(0.1):
+                while True:
+                    items = await asyncio.to_thread(preceding_tool_text, anchor)
+                    if items is not None:
+                        break
+                    await asyncio.sleep(0.005)
+        except TimeoutError:
+            return
+        for item in items:
+            identity = (item["row_id"], item["index"])
+            if identity in self._native_pretool_text_ids:
+                continue
+            text = item["text"]
+            display_text = text.strip()
+            if display_text in self._unmatched_display_texts:
+                self._unmatched_display_texts.remove(display_text)
+                self._native_pretool_text_ids.add(identity)
+                continue
+            await self._emit(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "model": self._model or "interactive",
+                        "content": [{"type": "text", "text": text}],
+                    },
+                    "metadata": {
+                        "source": "claude_native_pretool",
+                        "claude_message_id": item["message_id"],
+                        "native_row_id": item["row_id"],
+                        "native_block_index": item["index"],
+                        "claude_session_id": anchor["native_session_id"],
+                        "before_tool_use_id": anchor["native_tool_use_id"],
+                    },
+                }
+            )
+            self._native_pretool_text_ids.add(identity)
+            self._pending_native_display_texts.append(display_text)
+            self._turn_displayed_texts.append(display_text)
 
     async def _emit_message_display_from_hook(self, payload: dict[str, Any]) -> None:
         """MessageDisplay hook → a whole-message assistant frame per displayed message, MID-TURN.
@@ -1174,9 +1243,18 @@ class TmuxInteractiveTransport(CLITransport):
             last_result_text = str((self._last_result or {}).get("result") or "")
             if self._normalize_prompt(text) == self._normalize_prompt(last_result_text):
                 return
-        # De-dupe re-displays of the same message (TUI redraws, resumed panes) within a turn.
-        if text in self._turn_displayed_texts:
+        self._mark_semantic_turn_started()
+        # Native and display IDs differ. Consume only ONE exact delayed display
+        # occurrence per pre-tool native item; identical later messages survive.
+        if message_id != "current" and message_id in self._displayed_message_ids:
             return
+        self._displayed_message_ids.add(message_id)
+        if text in self._pending_native_display_texts:
+            self._pending_native_display_texts.remove(text)
+            return
+        if message_id == "current" and text in self._turn_displayed_texts:
+            return  # Legacy hooks without an identity retain their redraw guard.
+        self._unmatched_display_texts.append(text)
         self._turn_displayed_texts.append(text)
         if len(self._turn_displayed_texts) > 32:
             del self._turn_displayed_texts[:-32]

@@ -178,6 +178,14 @@
           "content": "",
           "is_error": false,
           "ended_at": "2026-09-08T10:26:46.213405+00:00"
+        },
+        {
+          "type": "text",
+          "id": "legacy-text-3",
+          "text": "Wrote `label.json`: `{\"label\": \"violet comet\"}`.\n\nremembered sum=42 file=answer.json\n\n[FORGE_DONE:ca60f951decc470bbfae94e29ff38a70:question-freeform]",
+          "complete": true,
+          "id_source": "synthetic",
+          "index": 3
         }
       ],
       "created_at": "2026-09-08T10:26:53.366552+00:00",
@@ -245,5 +253,18 @@
       "content_block_delta": 55,
       "result": 1
     }
+  },
+  "projection_review": {
+    "schema_version": 1,
+    "status": "accepted",
+    "reviewer": "Codex integration review, 2026-09-08",
+    "source_frames_sha256": "784c2d03115ec195dec83f3f5edfb0012c8001716dc3cee9a4c64bdeee5927e6",
+    "previous_projection_sha256": "70c171cb63f3cf4ee500b554e681d579ca52ee83dc2468fe6e551e68f202703b",
+    "projection_sha256": "d6ce2e78c7f7b13482215e7070936ec7a6e99df243590fa53ac5779539d8ed06",
+    "notes": [
+      "Captured final text deltas now produce one ordered text part after the tool burst.",
+      "Exact final prose, every nontext part, turn identity and accounting unchanged.",
+      "Original raw frames and original capture review remain unchanged."
+    ]
   }
 }

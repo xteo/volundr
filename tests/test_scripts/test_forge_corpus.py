@@ -173,3 +173,7 @@ def test_reviewed_live_corpus_replays_exactly_and_keeps_review_hash(fixture):
     state = rebuild_turns(entries(rows))
     assert state.turns == expectation["expected_turns"]
     assert state.partial == expectation["expected_partial"]
+    if review := expectation.get("projection_review"):
+        assert review["status"] == "accepted"
+        assert review["source_frames_sha256"] == digest(rows)
+        assert review["projection_sha256"] == digest(state.turns)

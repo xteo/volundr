@@ -2,7 +2,7 @@
 
 import json
 from collections import Counter, defaultdict
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from volundr.domain.models import SessionLogEntry
 
@@ -45,7 +45,7 @@ def _text(content: object, *, human: bool = False) -> str:
     return "\n".join(values)
 
 
-def _message(record: dict) -> tuple[str, str, str, str | None] | None:
+def _message(record: dict) -> tuple[str, str, str, str | None, str | None] | None:
     payload = record.get("payload", {})
     if not isinstance(payload, dict):
         return None
@@ -69,20 +69,33 @@ def _message(record: dict) -> tuple[str, str, str, str | None] | None:
         return None
     if item.get("channel") == "analysis" or item.get("isMeta"):
         return None
+    if family == "modern" and role == "assistant" and item.get("delivery") == "async":
+        # request_user_input_async materializes its question card as an
+        # AgentMessage whose ID is the function call ID. Its content is control
+        # context, not a public final answer. The actual call/result records
+        # below retain that interaction without inventing assistant prose.
+        return None
     content = item.get("message") if family == "event" else item.get("content")
     text = _text(content, human=role == "user")
     if not text:
         return None
     native_id = item.get("id")
-    return role, text, family, native_id if isinstance(native_id, str) else None
+    phase = item.get("phase") or item.get("channel")
+    phase = phase if phase in ("commentary", "final_answer") else None
+    return role, text, family, native_id if isinstance(native_id, str) else None, phase
 
 
-def _records_with_turn(source: NativeTranscript) -> list[tuple[int, dict, str]]:
+def _records_with_turn(source: NativeTranscript, external_id: str) -> list[tuple[int, dict, str]]:
     turn_id = ""
     result = []
     for line, record in source.records:
         payload = record.get("payload")
         if isinstance(payload, dict):
+            thread_id = payload.get("thread_id") or payload.get("threadId")
+            if thread_id and thread_id != external_id:
+                # Native worker events can be multiplexed into a parent log.
+                # Their messages and terminal events cannot own the parent span.
+                continue
             if record.get("type") == "turn_context" or payload.get("type") == "task_started":
                 turn_id = str(payload.get("turn_id") or turn_id)
         result.append((line, record, turn_id))
@@ -104,12 +117,12 @@ def parse_codex_transcript(
         raise ValueError("Codex transcript identity does not match the requested native session")
 
     builder = NativeTranscriptBuilder("codex", external_id, session_id, source)
-    records = _records_with_turn(source)
+    records = _records_with_turn(source, external_id)
     counts: dict[tuple[str, str, str], Counter] = defaultdict(Counter)
     for _, record, turn in records:
         message = _message(record)
         if message:
-            role, text, family, _ = message
+            role, text, family, _, _ = message
             counts[(turn, role, text)][family] += 1
     occurrences: dict[tuple[str, str, str], Counter] = defaultdict(Counter)
     message_ids: dict[tuple[str, str], str] = {}
@@ -182,7 +195,7 @@ def parse_codex_transcript(
     for line, record, turn in records:
         message = _message(record)
         if message:
-            role, text, family, native_id = message
+            role, text, family, native_id, phase = message
             key = (turn, role, text)
             occurrences[key][family] += 1
             mirrored = max(
@@ -203,7 +216,24 @@ def parse_codex_transcript(
                 if previous is not None:
                     continue
                 message_ids[identity] = text
-            content: object = text if role == "user" else [{"type": "text", "text": text}]
+            content: object = text
+            if role == "assistant":
+                identifier = native_id or str(
+                    uuid5(NAMESPACE_URL, f"codex:{external_id}:{turn}:text-line:{line}")
+                )
+                block = {
+                    "type": "text",
+                    "id": identifier,
+                    "text": text,
+                    "complete": True,
+                    "id_source": "native" if native_id else "synthetic",
+                    "thread_id": external_id,
+                }
+                if phase:
+                    block["phase"] = phase
+                if turn:
+                    block["turn_id"] = turn
+                content = [block]
             emit(
                 {"type": role, "role": role, "message": {"role": role, "content": content}},
                 line,
@@ -246,6 +276,26 @@ def parse_codex_transcript(
             completed_turns.add(completion_id)
             final = payload.get("last_agent_message")
             text = final if isinstance(final, str) and final != last_assistant.get(turn) else ""
+            if text:
+                # Some rollouts retain the final public message only on task_complete.
+                # A result string alone is a fallback for an otherwise empty turn;
+                # it cannot repair a turn which already contains commentary.
+                block = {
+                    "type": "text",
+                    "id": str(uuid5(NAMESPACE_URL, f"codex:{external_id}:{completion_id}:final")),
+                    "id_source": "synthetic",
+                    "thread_id": external_id,
+                    "text": text,
+                    "phase": "final_answer",
+                    "complete": True,
+                }
+                if turn:
+                    block["turn_id"] = turn
+                emit(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [block]}},
+                    line,
+                    record,
+                )
             emit(
                 {"type": "result", "result": text, "stop_reason": "end_turn", "is_error": False},
                 line,

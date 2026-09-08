@@ -5,6 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from niuu.domain.transcript_reducer import (
+    TurnAccumulator,
+    apply_assistant_blocks,
+    apply_text_delta,
+    apply_text_start,
+    apply_text_stop,
+)
 from niuu.ports.cli.transport import CLITransport
 
 logger = logging.getLogger("niuu.cli.runtime")
@@ -101,24 +108,40 @@ class CliTurnRunner:
         result_future: asyncio.Future[str] = loop.create_future()
         self._pending_responses[request_id] = result_future
 
-        collected_text: list[str] = []
+        # Share the item-scoped policy with live and durable projection. Arbitrary
+        # chunks must not gain separators, and whole completions replace that item.
+        text_accumulator = TurnAccumulator()
         original_callback = self._transport.event_callback
 
         async def capture_event(data: dict) -> None:
             event_type = data.get("type", "")
 
             if event_type == "assistant":
-                self._capture_assistant_text(data, collected_text)
+                message = data.get("message")
+                content = (
+                    message.get("content") if isinstance(message, dict) else data.get("content")
+                )
+                blocks = (
+                    [{"type": "text", "text": content}] if isinstance(content, str) else content
+                )
+                apply_assistant_blocks(text_accumulator, blocks)
+            elif event_type == "content_block_start":
+                apply_text_start(text_accumulator, data)
             elif event_type == "content_block_delta":
-                self._capture_delta_text(data, collected_text)
+                delta = data.get("delta")
+                if isinstance(delta, dict) and isinstance(delta.get("text"), str):
+                    apply_text_delta(text_accumulator, delta["text"], frame=data)
+            elif event_type == "content_block_stop":
+                apply_text_stop(text_accumulator, data)
 
             if event_type == "result":
                 result_text = data.get("result", "")
-                if isinstance(result_text, str) and result_text:
-                    collected_text.clear()
-                    collected_text.append(result_text)
                 if not result_future.done():
-                    result_future.set_result("\n".join(collected_text) if collected_text else "")
+                    result_future.set_result(
+                        result_text
+                        if isinstance(result_text, str) and result_text
+                        else text_accumulator.content
+                    )
 
             if original_callback is None:
                 return
@@ -132,23 +155,3 @@ class CliTurnRunner:
         finally:
             self._transport.on_event(original_callback)
             self._pending_responses.pop(request_id, None)
-
-    def _capture_assistant_text(self, data: dict, collected_text: list[str]) -> None:
-        message = data.get("message", {})
-        if isinstance(message, dict):
-            content = message.get("content", "")
-            if isinstance(content, str) and content:
-                collected_text.append(content)
-            return
-
-        content = data.get("content", "")
-        if isinstance(content, str) and content:
-            collected_text.append(content)
-
-    def _capture_delta_text(self, data: dict, collected_text: list[str]) -> None:
-        delta = data.get("delta", {})
-        if not isinstance(delta, dict):
-            return
-        text = delta.get("text", "")
-        if isinstance(text, str) and text:
-            collected_text.append(text)

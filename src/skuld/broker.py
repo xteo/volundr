@@ -44,12 +44,15 @@ from pydantic import BaseModel, Field
 from niuu.build_identity import build_identity
 from niuu.domain.logging import LoggingConfig
 from niuu.domain.outcome import parse_outcome_block
+from niuu.domain.text_projection import projection_revision
 from niuu.domain.transcript_reducer import (
     PER_CONNECT_MARKER,
     TurnAccumulator,
     apply_assistant_blocks,
     apply_result_content,
     apply_text_delta,
+    apply_text_start,
+    apply_text_stop,
     apply_thinking_delta,
     apply_tool_result_blocks,
     assistant_turn_id,
@@ -1363,7 +1366,8 @@ class Broker:
         path = self._conversation_history_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            data = {"turns": [asdict(t) for t in self._conversation_turns]}
+            turns = [asdict(t) for t in self._conversation_turns]
+            data = {"turns": turns, "projection_revision": projection_revision(turns)}
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
             logger.warning("Failed to save conversation history to %s", path, exc_info=True)
@@ -1387,7 +1391,7 @@ class Broker:
         array on BOTH reconnect replay and REST GET. Stable sentinel id so clients dedup
         across polls. visibility:'public' included so the row is shape-identical to asdict()
         on the replay path (web normalizers that read visibility don't choke). Mutation-safe:
-        snapshots parts via list() and appends the reasoning tail only to the local copy, so
+        copies part dictionaries and appends the reasoning tail only to the local copy, so
         repeated polls never disturb the eventual real flush; once the turn flushes this
         predicate goes False and it is served once as a real completed turn instead.
         """
@@ -1397,7 +1401,7 @@ class Broker:
             or self._pending_reasoning_text
         ):
             return None
-        parts: list[dict] = list(self._pending_assistant_parts)
+        parts: list[dict] = [dict(part) for part in self._pending_assistant_parts]
         if self._pending_reasoning_text:
             parts = [
                 *parts,
@@ -1822,6 +1826,7 @@ class Broker:
             "ask_user_question_enabled": self._settings.ask_user_question_enabled,
             "acp_prompt_timeout_s": self._settings.acp_prompt_timeout_s,
             "codex_receive_max_bytes": self._settings.codex_receive_max_bytes,
+            "live_frame_max_bytes": self._settings.live_frame_max_bytes,
         }
 
     def _create_transport(self) -> CLITransport:
@@ -3657,6 +3662,16 @@ class Broker:
             self._pending_assistant_content = acc.content
             self._pending_assistant_last_seq = self._event_log_seq
 
+        # Reserve/close text anchors as part of the same shared fold as raw replay.
+        if event_type in ("content_block_start", "content_block_stop"):
+            acc = self._pending_accumulator()
+            if event_type == "content_block_start":
+                apply_text_start(acc, data)
+            else:
+                apply_text_stop(acc, data)
+            self._pending_assistant_content = acc.content
+            self._pending_assistant_last_seq = self._event_log_seq
+
         # HTTP streaming format: accumulate deltas
         if event_type == "content_block_delta":
             delta = data.get("delta", {})
@@ -3667,7 +3682,7 @@ class Broker:
                 apply_thinking_delta(acc, delta.get("thinking", ""))
                 self._pending_reasoning_text = acc.reasoning
             else:
-                apply_text_delta(acc, delta.get("text", ""))
+                apply_text_delta(acc, delta.get("text", ""), frame=data)
                 self._pending_assistant_content = acc.content
             self._pending_assistant_last_seq = self._event_log_seq
 
@@ -6622,6 +6637,7 @@ class Broker:
                         {
                             "type": "conversation_history",
                             "turns": replay_turns,
+                            "projection_revision": projection_revision(replay_turns),
                             # SRD FR-6: the durable-log head seq at reconnect time. The
                             # client loads this state, then resumes the live tail from
                             # head_seq+1 with no gap and no duplicate (the broker keeps
@@ -7134,6 +7150,7 @@ async def get_conversation_history(detail: str = "full") -> dict:
     )
     return {
         "turns": turns,
+        "projection_revision": projection_revision(turns),
         "is_active": is_active,
         "last_activity": last_activity,
         "_prep": prep,

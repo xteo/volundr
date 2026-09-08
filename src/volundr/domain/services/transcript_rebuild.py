@@ -36,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from niuu.domain.text_projection import apply_repair_markers, repair_legacy_turns
 from niuu.domain.transcript_reducer import reduce_frames
 
 if TYPE_CHECKING:
@@ -66,7 +67,7 @@ def rebuild_turns(entries: list[SessionLogEntry]) -> RebuildResult:
         live = rebuild_turns([row for row in rows if row.seq > import_marker.seq])
         metadata = import_marker.payload if isinstance(import_marker.payload, dict) else {}
         return RebuildResult(
-            turns=[*imported.turns, *live.turns],
+            turns=apply_repair_markers([*imported.turns, *live.turns], rows),
             partial=imported.partial or live.partial or bool(metadata.get("partial")),
         )
 
@@ -125,7 +126,11 @@ def rebuild_turns(entries: list[SessionLogEntry]) -> RebuildResult:
         seen_ids=seen_ids,
         scrape=None if has_sdk_assistant else _extract_assistant_text,
     )
-    return RebuildResult(turns=result.turns, partial=result.partial)
+    # Explicit verified repairs take precedence over automatic reconstruction,
+    # including native item IDs/phases recovered from a separately verified log.
+    turns = apply_repair_markers(result.turns, rows)
+    turns = repair_legacy_turns(turns, rows)
+    return RebuildResult(turns=turns, partial=result.partial)
 
 
 # --------------------------------------------------------------------------- tmux pane scrape

@@ -144,6 +144,14 @@
           "content": "FORGE_BACKGROUND_DONE\n",
           "is_error": false,
           "ended_at": "2026-09-07T16:57:02.101209+00:00"
+        },
+        {
+          "type": "text",
+          "id": "legacy-text-2",
+          "text": "Command completed successfully; observed `FORGE_BACKGROUND_DONE`.\n\n[FORGE_DONE:e7a66de14733482c8c56e3fb3becca7e:background]",
+          "complete": true,
+          "id_source": "synthetic",
+          "index": 2
         }
       ],
       "created_at": "2026-09-07T16:57:07.006080+00:00",
@@ -211,5 +219,18 @@
       "content_block_stop": 3,
       "result": 1
     }
+  },
+  "projection_review": {
+    "schema_version": 1,
+    "status": "accepted",
+    "reviewer": "Codex integration review, 2026-09-08",
+    "source_frames_sha256": "b27deac17e93d3770acff63cd215a58babdb93588bac01bc457df52972e0d8e1",
+    "previous_projection_sha256": "e33e51c833619696d28010d349a790642b1a90c5c4629a8fc7b63ddf4b65dd5d",
+    "projection_sha256": "0365a4c3553ccec70134c64286a1df36f0d51c6def3e3ec016fd24db32b3974b",
+    "notes": [
+      "Captured final text deltas now produce one ordered text part after the tool burst.",
+      "Exact final prose, every nontext part, turn identity and accounting unchanged.",
+      "Original raw frames and original capture review remain unchanged."
+    ]
   }
 }

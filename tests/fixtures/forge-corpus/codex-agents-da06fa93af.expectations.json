@@ -289,6 +289,14 @@
           "content": "{\"receiverThreadIds\": [], \"agentsStates\": {}, \"status\": \"completed\"}",
           "is_error": false,
           "ended_at": "2026-09-07T16:56:14.376266+00:00"
+        },
+        {
+          "type": "text",
+          "id": "legacy-text-8",
+          "text": "Both read-only workers finished and agree:\n- Worker 1 independently calculated **42**.\n- Worker 2 confirmed `answer.json` contains exactly `{\"sum\": 42}`, matching `numbers.json`.\n\n[FORGE_DONE:0aeace12b4d143618f05a59652a0c6d5:agents]",
+          "complete": true,
+          "id_source": "synthetic",
+          "index": 8
         }
       ],
       "created_at": "2026-09-07T16:56:18.459962+00:00",
@@ -411,5 +419,18 @@
       "message_delta": 5,
       "result": 1
     }
+  },
+  "projection_review": {
+    "schema_version": 1,
+    "status": "accepted",
+    "reviewer": "Codex integration review, 2026-09-08",
+    "source_frames_sha256": "da06fa93afbc80a823df6db86b37473b15f07f4d69a0671d592c5a31f7570e1e",
+    "previous_projection_sha256": "765df533bbea6877cd02d6ffb715aab1559a6337b8988ade70a296eb6e1e4919",
+    "projection_sha256": "22b3819afb2ceecce5df11981087c0c208b91bd527ff554427105a2f4c0e3d06",
+    "notes": [
+      "Captured final text deltas now produce one ordered text part after the tool burst.",
+      "Exact final prose, every nontext part, turn identity and accounting unchanged.",
+      "Original raw frames and original capture review remain unchanged."
+    ]
   }
 }
