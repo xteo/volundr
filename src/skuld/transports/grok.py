@@ -301,6 +301,16 @@ class GrokACPTransport(CLITransport):
             return
         self._starting = True
 
+        try:
+            await self._start_agent()
+        except BaseException:
+            # Cancellation is a failed start too. The prompt lock may already
+            # be held by send_message(), so cleanup must not reacquire it.
+            await self._teardown_process()
+            raise
+
+    async def _start_agent(self) -> None:
+
         grok_bin = (
             self._grok_bin_override or os.environ.get("GROK_BIN") or shutil.which("grok") or "grok"
         )
@@ -367,17 +377,21 @@ class GrokACPTransport(CLITransport):
 
     async def stop(self) -> None:
         async with self._lock:
-            if self._reader_task and not self._reader_task.done():
-                self._reader_task.cancel()
-            if self._process:
-                await _stop_process(self._process)
-            self._process = None
-            self._starting = False
-            self._reader_task = None
-            self._stdout_reader = None
-            self._pending.clear()
-            self._early_results.clear()
-            self._current_prompt_id = None
+            await self._teardown_process()
+
+    async def _teardown_process(self) -> None:
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            await asyncio.gather(self._reader_task, return_exceptions=True)
+        if self._process:
+            await _stop_process(self._process)
+        self._process = None
+        self._starting = False
+        self._reader_task = None
+        self._stdout_reader = None
+        self._pending.clear()
+        self._early_results.clear()
+        self._current_prompt_id = None
 
     # ------------------------------------------------------------------
     # ACP JSON-RPC over stdio
@@ -402,6 +416,8 @@ class GrokACPTransport(CLITransport):
                     data: dict[str, Any] = json.loads(raw)
                 except json.JSONDecodeError:
                     logger.debug("Grok ACP non-JSON line (ignored for protocol): %s", raw[:120])
+                    continue
+                if not isinstance(data, dict):
                     continue
 
                 # Notification from agent (the important streaming path)
@@ -461,6 +477,10 @@ class GrokACPTransport(CLITransport):
         except Exception as exc:
             logger.exception("Grok ACP reader loop error: %r", exc)
         finally:
+            for future in list(self._pending.values()):
+                if not future.done():
+                    future.set_exception(RuntimeError("Grok ACP connection closed"))
+            self._pending.clear()
             logger.info("Grok ACP reader loop exited")
 
     async def _acp_send(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -477,22 +497,21 @@ class GrokACPTransport(CLITransport):
         fut: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
 
-        self._process.stdin.write(line.encode())
-        await self._process.stdin.drain()
-
-        # The reader may have answered (and buffered) before we got here.
-        early = self._early_results.pop(req_id, None)
-        if early is not None:
-            self._pending.pop(req_id, None)
-            if "error" in early:
-                raise RuntimeError(early["error"])
-            return early.get("result") or {}
-
         # Bounded wait so a silent/unresponsive agent can never hang the handshake.
         try:
+            self._process.stdin.write(line.encode())
+            await self._process.stdin.drain()
+
+            early = self._early_results.pop(req_id, None)
+            if early is not None:
+                if "error" in early:
+                    raise RuntimeError(early["error"])
+                return early.get("result") or {}
             return await asyncio.wait_for(fut, timeout=self._prompt_timeout)
         finally:
             self._pending.pop(req_id, None)
+            if not fut.done():
+                fut.cancel()
 
     async def _handle_agent_request(self, data: dict) -> None:
         """Answer an agent->client JSON-RPC request. Never leave one unanswered.
@@ -704,10 +723,9 @@ class GrokACPTransport(CLITransport):
             },
         }
 
-        self._process.stdin.write((json.dumps(msg) + "\n").encode())
-        await self._process.stdin.drain()
-
         try:
+            self._process.stdin.write((json.dumps(msg) + "\n").encode())
+            await self._process.stdin.drain()
             if self._early_results.pop(req_id, None) is None:
                 await asyncio.wait_for(asyncio.shield(fut), timeout=self._prompt_timeout)
         except TimeoutError:
@@ -767,6 +785,8 @@ class GrokACPTransport(CLITransport):
         finally:
             self._pending.pop(req_id, None)
             self._current_prompt_id = None
+            if not fut.done():
+                fut.cancel()
 
     # ------------------------------------------------------------------
     # Event mapping (ACP -> broker-expected Claude-style events)

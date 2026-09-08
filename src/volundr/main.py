@@ -52,6 +52,7 @@ from volundr.adapters.inbound.rest_events import create_events_router
 from volundr.adapters.inbound.rest_git import create_git_router
 from volundr.adapters.inbound.rest_integrations import create_canonical_integrations_router
 from volundr.adapters.inbound.rest_issues import create_canonical_issues_router
+from volundr.adapters.inbound.rest_message_delivery import create_message_delivery_router
 from volundr.adapters.inbound.rest_oauth import create_canonical_oauth_router
 from volundr.adapters.inbound.rest_prompts import create_prompts_router
 from volundr.adapters.inbound.rest_resources import create_resources_router
@@ -66,6 +67,7 @@ from volundr.adapters.outbound.git_registry import create_git_registry
 from volundr.adapters.outbound.linear import LinearAdapter
 from volundr.adapters.outbound.memory_secrets import InMemorySecretManager
 from volundr.adapters.outbound.pg_event_sink import PostgresEventSink
+from volundr.adapters.outbound.pg_message_delivery import PostgresMessageDelivery
 from volundr.adapters.outbound.pg_session_event_log import PostgresSessionEventLog
 from volundr.adapters.outbound.postgres import PostgresSessionRepository
 from volundr.adapters.outbound.postgres_chronicles import PostgresChronicleRepository
@@ -147,16 +149,17 @@ async def _bootstrap_startup_schema(settings: Settings) -> None:
     import asyncpg
 
     from cli.resources import migration_dir, ordered_migration_files
+    from volundr.adapters.outbound.startup_schema import apply_startup_migrations
 
     try:
         mig_dir = migration_dir("volundr")
     except FileNotFoundError:
-        logger.debug("No Volundr migrations available for startup bootstrap")
-        return
+        logger.error("Volundr startup migrations are missing; refusing an unverified schema")
+        raise
 
     sql_files = ordered_migration_files(mig_dir)
     if not sql_files:
-        return
+        raise RuntimeError("Volundr startup migration directory is empty; schema is unverified")
 
     conn = await asyncpg.connect(
         host=settings.database.host,
@@ -166,11 +169,7 @@ async def _bootstrap_startup_schema(settings: Settings) -> None:
         database=settings.database.name,
     )
     try:
-        for sql_file in sql_files:
-            try:
-                await conn.execute(sql_file.read_text())
-            except Exception:
-                logger.debug("Migration %s skipped", sql_file.name, exc_info=True)
+        await apply_startup_migrations(conn, sql_files)
     finally:
         await conn.close()
 
@@ -908,6 +907,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     session_service,
                     allowed_workspace_prefixes=settings.local_mounts.allowed_prefixes,
                     allow_root_workspace=settings.local_mounts.allow_root_mount,
+                    event_log_repository=session_event_log,
                 )
 
             # Create and include routers
@@ -1145,6 +1145,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 default_show_internal=settings.replay.default_show_internal,
             )
             app.include_router(session_log_router)
+            app.include_router(
+                create_message_delivery_router(PostgresMessageDelivery(pool), session_service)
+            )
 
             # Replay-as-live: paced re-emit of recorded frames over a WebSocket,
             # speaking the live-session frame protocol so existing clients

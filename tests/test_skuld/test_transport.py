@@ -1291,7 +1291,8 @@ class TestSdkWebSocketTransport:
             assert env["RAVN_WORKSPACE_DIR"] == str(tmp_path)
 
     @pytest.mark.asyncio
-    async def test_spawn_without_agent_teams_no_env(self, tmp_path):
+    async def test_spawn_without_agent_teams_no_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
         t = SdkWebSocketTransport(
             workspace_dir=str(tmp_path),
             sdk_port=8081,

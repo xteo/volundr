@@ -40,6 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import WebSocketDisconnect
 
 from skuld.broker import Broker
@@ -287,6 +288,13 @@ class BrokerHarness:
         settings.session.workspace_dir = str(workspace_dir)
 
         self.broker = Broker(settings=settings)
+        # The real event handler schedules activity/usage/trace HTTP calls even
+        # without startup(). Keep that boundary hermetic too: harness.invalid
+        # must never cause DNS or real network traffic during a tmux test.
+        self.broker._http_client = httpx.AsyncClient(
+            base_url="http://harness.invalid",
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+        )
         # Minimal manual wiring — no startup(): hand the transport to the broker
         # and route its events into the broker's CLI pipeline.
         self.broker._transport = self.transport
@@ -319,6 +327,8 @@ class BrokerHarness:
             self.hook_server = None
 
         self._restore_env()
+        if self.broker is not None and self.broker._http_client is not None:
+            await self.broker._http_client.aclose()
         self.broker = None
         self._started = False
 

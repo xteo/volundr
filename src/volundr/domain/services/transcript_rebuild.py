@@ -56,6 +56,20 @@ def rebuild_turns(entries: list[SessionLogEntry]) -> RebuildResult:
     if not rows:
         return RebuildResult(turns=[], partial=False)
 
+    # Native history is imported as raw replay frames, with an atomic boundary
+    # marker. Later live conversation.turn rows cover only the post-import tail;
+    # treating those seeds as authoritative for ALL earlier rows would erase
+    # the recovered conversation as soon as the resumed agent completes a turn.
+    import_marker = next((row for row in rows if row.kind == "history_import"), None)
+    if import_marker is not None:
+        imported = reduce_frames([row for row in rows if row.seq < import_marker.seq])
+        live = rebuild_turns([row for row in rows if row.seq > import_marker.seq])
+        metadata = import_marker.payload if isinstance(import_marker.payload, dict) else {}
+        return RebuildResult(
+            turns=[*imported.turns, *live.turns],
+            partial=imported.partial or live.partial or bool(metadata.get("partial")),
+        )
+
     sdk_turn_rows = [r for r in rows if r.kind == "conversation.turn"]
     folded_request_ids = {r.request_id for r in sdk_turn_rows if r.request_id}
 

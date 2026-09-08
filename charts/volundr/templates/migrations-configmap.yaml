@@ -1284,4 +1284,51 @@ data:
   000050_device_tokens.down.sql: |
     DROP INDEX IF EXISTS idx_device_tokens_owner;
     DROP TABLE IF EXISTS device_tokens;
+  000051_session_activity_state_since.down.sql: |
+    ALTER TABLE sessions DROP COLUMN IF EXISTS activity_state_since;
+  000051_session_activity_state_since.up.sql: |
+    -- Timestamp (UTC) of when a session ENTERED its current activity_state. Stamped
+    -- by the Skuld broker only on a real state change, so clients can render an
+    -- accurate "active for Ns" elapsed without re-deriving it from event arrival.
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS activity_state_since TIMESTAMPTZ;
+  000052_session_turn_started_at.down.sql: |
+    ALTER TABLE sessions DROP COLUMN IF EXISTS turn_started_at;
+  000052_session_turn_started_at.up.sql: |
+    -- Timestamp (UTC) of when a session's CURRENT turn started (the user's prompt
+    -- landing). Stable across intra-turn active/tool_executing flips (unlike
+    -- activity_state_since, which re-stamps on coarse-bucket changes). NULL when no
+    -- turn is in flight, or when an older broker doesn't report it. Clients anchor
+    -- the RUNNING elapsed to this, falling back to activity_state_since when NULL.
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMPTZ;
+  000053_message_delivery_claims.down.sql: |
+    DROP TABLE IF EXISTS session_message_deliveries;
+  000053_message_delivery_claims.up.sql: |
+    -- Durable dispatch identities: pending claims are never silently re-executed.
+    CREATE TABLE IF NOT EXISTS session_message_deliveries (
+        session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        request_id VARCHAR(200) NOT NULL,
+        payload_hash CHAR(64) NOT NULL,
+        claim_token UUID NOT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'delivered', 'failed')),
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (session_id, request_id)
+    );
+  000054_remove_duplicate_event_log_index.down.sql: |
+    CREATE INDEX IF NOT EXISTS idx_session_event_log_session_seq
+        ON session_event_log (session_id, seq);
+  000054_remove_duplicate_event_log_index.up.sql: |
+    -- The primary key already provides this exact ordered index.
+    DROP INDEX IF EXISTS idx_session_event_log_session_seq;
+  000055_startup_schema_history.down.sql: |
+    DROP TABLE IF EXISTS volundr_schema_history;
+  000055_startup_schema_history.up.sql: |
+    -- Standalone bootstrap uses this same table before applying the numbered set.
+    CREATE TABLE IF NOT EXISTS volundr_schema_history (
+        filename TEXT PRIMARY KEY,
+        sha256 CHAR(64) NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 {{- end }}

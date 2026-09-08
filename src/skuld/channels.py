@@ -16,6 +16,7 @@ from typing import Any, Literal
 from fastapi import WebSocketDisconnect
 
 from niuu.domain.outcome import parse_outcome_block
+from skuld.live_frames import prepare_live_frame
 
 logger = logging.getLogger("skuld.channels")
 
@@ -175,7 +176,9 @@ class WebSocketChannel(MessageChannel):
     broker's channel registry alongside other channel types.
     """
 
-    def __init__(self, ws: object, *, show_internal: bool = False) -> None:
+    def __init__(
+        self, ws: object, *, show_internal: bool = False, max_frame_bytes: int | None = None
+    ) -> None:
         """Initialize with a FastAPI WebSocket instance.
 
         Args:
@@ -189,6 +192,7 @@ class WebSocketChannel(MessageChannel):
         self._closed = False
         self._show_internal = show_internal
         self._open_block_type: str | None = None
+        self._max_frame_bytes = max_frame_bytes
 
     def set_show_internal(self, visible: bool) -> None:
         """Update the per-channel filter for tool_use / tool_result events."""
@@ -212,7 +216,9 @@ class WebSocketChannel(MessageChannel):
                 return
             event = filtered
         try:
-            await self._ws.send_text(json.dumps(event))
+            if self._max_frame_bytes is not None:
+                event = prepare_live_frame(event, max_bytes=self._max_frame_bytes)
+            await self._ws.send_text(json.dumps(event, ensure_ascii=False))
         except Exception as exc:
             if not _is_expected_ws_disconnect(exc):
                 raise

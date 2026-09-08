@@ -75,7 +75,7 @@ _DEFAULT_TIER_MODES = (SDK, PERSISTENT)
 
 def _tmux_param() -> object:
     """The tmux_interactive param — integration-tier; skips if tmux is missing."""
-    marks = [pytest.mark.integration]
+    marks = [pytest.mark.integration, pytest.mark.tmux]
     if shutil.which("tmux") is None:
         marks.append(pytest.mark.skip(reason="tmux is not installed"))
     return pytest.param(TMUX, marks=marks)

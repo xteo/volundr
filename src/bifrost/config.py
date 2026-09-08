@@ -120,8 +120,11 @@ def _default_models() -> list[ManagedModelConfig]:
     """Built-in Bifrost model catalog used when no explicit catalog is configured."""
     return [
         ManagedModelConfig(
-            id="claude-fable-5",
-            name="Claude Fable 5",
+            # Claude Fable 5.1 succeeds Claude Fable 5 in the same tier at the same price
+            # (Damien, 2026-09-02). `claude-fable-5` is still served, so a client on an old
+            # build that keeps sending it is not broken — it just no longer appears here.
+            id="claude-fable-5-1",
+            name="Claude Fable 5.1",
             vendor="anthropic",
             provider=ManagedModelProvider.CLOUD,
             tier=ManagedModelTier.FRONTIER,
@@ -130,7 +133,7 @@ def _default_models() -> list[ManagedModelConfig]:
                 "Anthropic's most capable model for demanding reasoning and "
                 "long-horizon agentic work; 1M-token context."
             ),
-            # Claude Fable 5 is $10 in / $50 out per 1M tokens (blended shown).
+            # Claude Fable 5.1 is $10 in / $50 out per 1M tokens (blended shown).
             cost_per_million_tokens=30.0,
             session_definition="skuldClaude",
             supports_tools=True,
@@ -229,6 +232,56 @@ def _default_models() -> list[ManagedModelConfig]:
             description="xAI Grok 4.5 agentic coding model (ACP over stdio).",
             cost_per_million_tokens=None,
             session_definition="skuldGrok",
+            supports_tools=True,
+            supports_thinking=True,
+        ),
+        # Meta Muse Spark — served by Muse Code (`muse serve`, MSP over stdio) and the Meta
+        # Model API. Ids are exactly what the API accepts; the -contributor variants are
+        # the discounted tier whose traffic Meta uses to improve its products.
+        ManagedModelConfig(
+            id="muse-spark-1.3",
+            name="Muse Spark 1.3",
+            vendor="meta",
+            provider=ManagedModelProvider.CLOUD,
+            tier=ManagedModelTier.FRONTIER,
+            color="#0866FF",
+            description=(
+                "Meta Muse Spark 1.3 — long-horizon coding and agentic work through Muse "
+                "Code (MSP over stdio); 1M-token context."
+            ),
+            # Muse Spark 1.3 is $1.25 in / $4.25 out per 1M tokens; use the output rate.
+            cost_per_million_tokens=4.25,
+            session_definition="skuldMuse",
+            supports_tools=True,
+            supports_thinking=True,
+        ),
+        ManagedModelConfig(
+            id="muse-spark-1.2",
+            name="Muse Spark 1.2",
+            vendor="meta",
+            provider=ManagedModelProvider.CLOUD,
+            tier=ManagedModelTier.BALANCED,
+            color="#0866FF",
+            description="Meta Muse Spark 1.2 — the previous Muse Code model; 1M-token context.",
+            cost_per_million_tokens=4.25,
+            session_definition="skuldMuse",
+            supports_tools=True,
+            supports_thinking=True,
+        ),
+        ManagedModelConfig(
+            id="muse-spark-1.3-contributor",
+            name="Muse Spark 1.3 (Contributor)",
+            vendor="meta",
+            provider=ManagedModelProvider.CLOUD,
+            tier=ManagedModelTier.EXECUTION,
+            color="#0866FF",
+            description=(
+                "Meta Muse Spark 1.3 at the contributor rate — prompts and outputs are "
+                "used by Meta to improve its products. Not for confidential code."
+            ),
+            # $0.10 in / $0.20 out per 1M tokens; use the output rate.
+            cost_per_million_tokens=0.20,
+            session_definition="skuldMuse",
             supports_tools=True,
             supports_thinking=True,
         ),

@@ -37,7 +37,9 @@ reducer here avoids deepening the skuld↔volundr coupling. This module imports 
 ## Unified metadata schema (chosen ONCE here)
 
   ``{usage, cost, model}`` (the names the UI reads), plus optional ``stop_reason``, ``status``
-  (``interrupted`` / ``error``) and ``provenance`` (``terminal_scrape``). The old rebuild-only
+  (``interrupted`` / ``error``) and ``provenance`` (``terminal_scrape``). Failed results also
+  retain ``is_error``, ``error`` and ``messageType: "error"`` so a transport failure cannot
+  masquerade as a successful completion after reload. The old rebuild-only
   ``modelUsage`` key is gone — it is normalised to ``usage`` here. There is deliberately NO
   ``source`` provenance tag: metadata must be path-IDENTICAL (live == rebuild) for INV-4, and a
   "which path produced this" marker cannot be both meaningful and identical across paths.
@@ -86,8 +88,8 @@ TOOL_STARTED_AT = "started_at"
 TOOL_ENDED_AT = "ended_at"
 TOOL_DURATION_MS = "duration_ms"
 
-# Synthetic / non-wire kinds: rows written to the durable log purely as derived
-# reducer SEEDS, never broadcast to a live channel (SRD FR-3 / FR-10). The broker
+# Synthetic / non-wire kinds: derived reducer seeds and atomic import markers,
+# never broadcast to a live channel (SRD FR-3 / FR-10). The broker
 # appends ``conversation.turn`` rows via ``Broker._append_turn`` so a fold (live OR
 # crash-rebuild) can consume them as authoritative ``sdk_turns`` without
 # re-deriving turns from raw frames — but the live broadcast NEVER emits them. The
@@ -95,8 +97,9 @@ TOOL_DURATION_MS = "duration_ms"
 # exclude these so literal frame-for-frame equality holds (live == replay == cold).
 # This is NOT a visibility concern (independent of ``show_internal``); it is the set
 # of kinds that simply do not belong on the wire. The reduce/rebuild path STILL
-# reads them as authoritative seeds — only the verbatim wire stream drops them.
-NON_BROADCAST_KINDS: frozenset[str] = frozenset({"conversation.turn"})
+# reads them as authoritative seeds or snapshot boundaries; only the verbatim
+# wire stream drops them.
+NON_BROADCAST_KINDS: frozenset[str] = frozenset({"conversation.turn", "history_import"})
 
 # Per-connect handshake/preamble frames: addressed to ONE freshly-connecting
 # socket, NOT the canonical shared stream (SRD FR-7 / INV-5). On every browser
@@ -151,8 +154,9 @@ def is_read_path_excluded(kind: str, payload: dict | None) -> bool:
     independent of ``show_internal`` (a separate visibility concern). Two rationales,
     both "this frame was never on the canonical shared wire":
 
-      * ``NON_BROADCAST_KINDS`` — synthetic reducer SEEDS (``conversation.turn``)
-        never broadcast to ANY channel; the reduce/rebuild path still reads them.
+      * ``NON_BROADCAST_KINDS`` — derived ``conversation.turn`` seeds and atomic
+        ``history_import`` markers, never broadcast to ANY channel; the
+        reduce/rebuild path still reads them.
       * per-connect handshakes (:func:`is_per_connect_ephemeral`) — broadcast to ONE
         socket only; a connecting client gets its own fresh handshake.
 
@@ -189,6 +193,7 @@ class TurnAccumulator:
     last_seq: int = 0
     # tmux LAST-RESORT pane rows, used only when no delta/assistant content exists.
     pending_tmux_rows: list[str] | None = None
+    native_import: dict | None = None
 
     def touch(self, ts: datetime | None, seq: int) -> None:
         if ts is not None:
@@ -203,6 +208,7 @@ class TurnAccumulator:
         self.parts = []
         self.reasoning = ""
         self.pending_tmux_rows = None
+        self.native_import = None
         # last_ts / last_seq intentionally retained as a floor for the next span.
 
 
@@ -399,6 +405,10 @@ def apply_result_content(acc: TurnAccumulator, payload: dict) -> None:
     content on BOTH paths. The guard is "no streamed assistant text" (empty ``content``), NOT
     ``is_empty()``: a tool_use-only turn has non-empty ``parts`` yet empty ``content``, and the
     live viewer saw the result text, so a rebuild must too.
+
+    A failed result may carry ONLY ``error`` (Codex socket EOF does this). Preserve the
+    failure as visible content when no prose exists. If text already streamed, its content
+    stays intact and :func:`result_metadata` carries the diagnostic without duplicating it.
     """
     if acc.content:
         return
@@ -408,6 +418,8 @@ def apply_result_content(acc: TurnAccumulator, payload: dict) -> None:
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
                 text = block["text"]
                 break
+    if not text and _result_status(payload) == "error":
+        text = _result_error_text(payload)
     acc.content = text
 
 
@@ -440,6 +452,8 @@ def build_assistant_turn(
     text = acc.content
     parts = finalize_parts(acc)
     meta = dict(metadata or {})
+    if acc.native_import is not None:
+        meta["native_import"] = dict(acc.native_import)
     if not text and not parts and scrape_text:
         text = scrape_text
         meta["provenance"] = "terminal_scrape"
@@ -490,10 +504,12 @@ def build_error_turn(session_id: str, seq: int, text: str, ts: datetime | None =
 
 
 def result_metadata(payload: dict) -> dict:
-    """Lift usage/cost/model from a ``result`` frame into the UNIFIED metadata schema.
+    """Lift accounting and terminal outcome into the UNIFIED metadata schema.
 
     Accepts either the live wire key ``modelUsage`` or a pre-normalised ``usage`` and always
     emits ``{usage, cost, model}`` — the names the UI reads — plus ``stop_reason`` when present.
+    Errors remain errors even after prose streamed, and intentional interruption remains
+    distinguishable from a provider failure. Successful results keep their existing shape.
     """
     usage = payload.get("modelUsage")
     if not isinstance(usage, dict):
@@ -508,7 +524,44 @@ def result_metadata(payload: dict) -> dict:
     stop_reason = payload.get("stop_reason")
     if stop_reason is not None:
         md["stop_reason"] = stop_reason
+    status = _result_status(payload)
+    if status is not None:
+        md["status"] = status
+    if payload.get("is_error") is True:
+        md["is_error"] = True
+    if status == "error":
+        md.update(is_error=True, error=_result_error_text(payload), messageType="error")
     return md
+
+
+def _result_status(payload: dict) -> str | None:
+    stop_reason = str(payload.get("stop_reason") or "").lower()
+    if stop_reason in {"interrupted", "cancelled", "canceled", "aborted"}:
+        return "interrupted"
+    if (
+        payload.get("is_error") is True
+        or stop_reason in {"error", "errored", "failed"}
+        or str(payload.get("subtype") or "").startswith("error_")
+    ):
+        return "error"
+    return None
+
+
+def _result_error_text(payload: dict) -> str:
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error = error.get("message")
+    if isinstance(error, str) and error.strip():
+        return error
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        messages = [message for message in errors if isinstance(message, str) and message.strip()]
+        if messages:
+            return "\n".join(messages)
+    result = payload.get("result")
+    if isinstance(result, str) and result.strip():
+        return result
+    return "The agent stopped with an error."
 
 
 # --------------------------------------------------------------------------- batch driver
@@ -531,6 +584,19 @@ _IGNORED_KINDS = frozenset(
         "tool_result",
         "log_gap",  # Epic-A overflow sentinel: a detectable hole marker, NOT content.
         "log_conflict",  # INV-3c sentinel: a distinct-payload seq collision marker, NOT content.
+    }
+)
+
+_CONVERSATIONAL_KINDS = frozenset(
+    {
+        "user",
+        "user_confirmed",
+        "assistant",
+        "content_block_delta",
+        "result",
+        "error",
+        "terminal_frame",
+        "terminal_snapshot",
     }
 )
 
@@ -570,6 +636,7 @@ def reduce_frames(
     turns: list[dict[str, Any]] = list(sdk_turns or [])
 
     acc = TurnAccumulator()
+    imported_prefix_open = False
     # turn_id -> (seq, steering_state): the delivery-state transitions seen in the log, applied
     # onto the matching user turns at the end (last-writer-wins by seq, == the live path).
     steering: dict[str, tuple[int, str]] = {}
@@ -587,11 +654,24 @@ def reduce_frames(
 
     for r in rows:
         k = r.kind
+        p = r.payload if isinstance(r.payload, dict) else {}
+        metadata = p.get("metadata")
+        is_imported = isinstance(metadata, dict) and isinstance(metadata.get("native_import"), dict)
+        # An imported snapshot is a distinct historical prefix. If it ended
+        # mid-turn, a subsequent live result must never finish that old work.
+        # Raw DB reads carry the boundary marker; public replay filters it out,
+        # so native provenance supplies the SAME boundary at the next live frame.
+        if imported_prefix_open and (
+            k == "history_import" or (not is_imported and k in _CONVERSATIONAL_KINDS)
+        ):
+            flush(status="interrupted")
+            imported_prefix_open = False
+        if is_imported:
+            imported_prefix_open = True
         if k in NON_BROADCAST_KINDS or k in _IGNORED_KINDS:
             continue
         if r.request_id and r.request_id in folded_request_ids:
             continue
-        p = r.payload if isinstance(r.payload, dict) else {}
         seq = int(r.seq)
         ts = _ts_of(r)
 
@@ -603,8 +683,15 @@ def reduce_frames(
                 continue
 
         if k in ("user", "user_confirmed"):
+            # Tool-result frames belong to the open assistant span. Human user
+            # frames flush that span first and carry their own provenance below.
+            if is_imported and _user_string_content(p) is None:
+                acc.native_import = acc.native_import or dict(metadata["native_import"])
             _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, k, p, flush)
             continue
+
+        if is_imported:
+            acc.native_import = acc.native_import or dict(metadata["native_import"])
 
         if k == "assistant":
             # D1: the frame's durable ts IS the tool_use start stamp — the same instant the
@@ -647,7 +734,11 @@ def reduce_frames(
 
     _apply_steering_states(turns, steering)
 
-    partial = any(t.get("metadata", {}).get("status") in ("interrupted", "error") for t in turns)
+    partial = any(
+        t.get("metadata", {}).get("status") in ("interrupted", "error")
+        or bool(t.get("metadata", {}).get("native_import", {}).get("partial"))
+        for t in turns
+    )
     return ReduceResult(turns=turns, partial=partial)
 
 
@@ -707,7 +798,15 @@ def _apply_user_frame(acc, turns, seen_ids, session_id, seq, ts, kind, payload, 
     flush()
     if uid:
         seen_ids.add(uid)
-    turns.append(build_user_turn(session_id, seq, content, turn_id=uid or None, ts=ts))
+    metadata = {}
+    source_metadata = payload.get("metadata")
+    if isinstance(source_metadata, dict) and isinstance(source_metadata.get("native_import"), dict):
+        metadata["native_import"] = dict(source_metadata["native_import"])
+    if payload.get("request_id"):
+        metadata["request_id"] = payload["request_id"]
+    turns.append(
+        build_user_turn(session_id, seq, content, turn_id=uid or None, ts=ts, metadata=metadata)
+    )
 
 
 def _turn_dict(

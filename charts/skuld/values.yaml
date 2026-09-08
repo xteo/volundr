@@ -225,6 +225,7 @@ broker:
   #   "skuld.transports.sdk.SDKTransport"                       # Claude Code (default)
   #   "skuld.transports.codex.CodexSubprocessTransport"         # OpenAI Codex
   #   "skuld.transports.grok.GrokACPTransport"                  # xAI Grok Build (ACP / Scaldy)
+  #   "skuld.transports.muse.MuseMSPTransport"                  # Meta Muse Code (MSP / Scaldy)
   transportAdapter: "skuld.transports.sdk.SDKTransport"
   # -- Skip tool permission prompts (true = --dangerously-skip-permissions for Claude,
   # --full-auto for Codex)

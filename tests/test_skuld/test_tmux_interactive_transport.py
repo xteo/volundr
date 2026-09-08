@@ -631,6 +631,7 @@ def test_capabilities_advertise_interactive_terminal_controls(tmp_path: Path) ->
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_real_tmux_smoke_with_fake_claude(
     tmp_path: Path,
@@ -1364,8 +1365,7 @@ async def test_correlated_prompt_captures_claude_native_session_id(tmp_path: Pat
     transport = FakeTmuxInteractiveTransport(str(tmp_path), sdk_port=8081)
     await _collect_events(transport)
     await transport.start()
-    tmux_name = transport._session_name
-    assert transport.session_id == tmux_name
+    assert transport.session_id is None
 
     # Uncorrelated prompt (a teammate pane's own hook) — no capture.
     await transport.handle_claude_hook(
@@ -1375,7 +1375,7 @@ async def test_correlated_prompt_captures_claude_native_session_id(tmp_path: Pat
             "session_id": "11111111-2222-3333-4444-555555555555",
         }
     )
-    assert transport.session_id == tmux_name
+    assert transport.session_id is None
 
     # Correlated prompt (we pasted it) — capture claude's native id.
     await transport.send_message("do the thing", msg_id="m-1")
@@ -1692,3 +1692,29 @@ def _async_return(value: Any):
         return value
 
     return _coro()
+
+
+@pytest.mark.asyncio
+async def test_workspace_trust_menu_is_not_a_prompt_and_cannot_receive_chat(tmp_path):
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    await transport.start()
+    transport.capture_stdout = (
+        "Accessing workspace:\n/test\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm"
+    )
+    before = list(transport.loaded_buffers)
+    assert not transport._repl_looks_ready(transport.capture_stdout)
+    with pytest.raises(RuntimeError, match="Workspace trust"):
+        await transport.send_message("This must not select No, exit")
+    assert transport.loaded_buffers == before
+    assert not transport._turn_active
+    assert not transport._send_lock.locked()
+    await transport.stop()
+
+
+@pytest.mark.asyncio
+async def test_seed_prompt_and_command_discovery_reject_workspace_trust_menu(tmp_path):
+    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    transport.capture_stdout = "Accessing workspace:\n❯ No, exit\nYes, I trust this folder"
+    with pytest.raises(RuntimeError, match="Workspace trust"):
+        await transport._wait_for_repl_ready()
+    assert not transport.loaded_buffers

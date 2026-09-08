@@ -176,10 +176,18 @@ def _user_turn(turns: list[dict]) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_parity_delivery_state_active(tmp_path):
+async def test_parity_delivery_state_active(tmp_path, monkeypatch):
     """INV-4 + INV-7: a user message driven to delivered+active stamps steering_state on the
     LIVE turn; rebuilding from the durable log must reconstruct the SAME steering_state — the
     delivery state is not a live-only, on-disk fact (it is folded from the logged ACK frames)."""
+    import importlib
+
+    module = importlib.import_module("skuld.broker")
+    monkeypatch.setattr(
+        module, "claim_message", AsyncMock(return_value={"claimed": True, "status": "pending"})
+    )
+    monkeypatch.setattr(module, "settle_message", AsyncMock())
+    monkeypatch.setattr(Broker, "_get_http_client", AsyncMock())
     b = _delivery_broker(tmp_path)
 
     await b._dispatch_browser_message({"content": "steer the agent", "request_id": "rq-1"})
@@ -202,12 +210,22 @@ async def test_parity_delivery_state_active(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_parity_delivery_state_failed(tmp_path):
+async def test_parity_delivery_state_failed(tmp_path, monkeypatch):
     """INV-4 + INV-7: a user message whose delivery terminally fails flips the LIVE turn to a
     visible ``failed`` state; the rebuild reconstructs ``failed`` from the logged
     user_delivery_failed frame — never silently losing it to a bare ``pending``."""
+    import importlib
+
+    from skuld.delivery_errors import DeliveryNotAcceptedError
+
+    module = importlib.import_module("skuld.broker")
+    monkeypatch.setattr(
+        module, "claim_message", AsyncMock(return_value={"claimed": True, "status": "pending"})
+    )
+    monkeypatch.setattr(module, "settle_message", AsyncMock())
+    monkeypatch.setattr(Broker, "_get_http_client", AsyncMock())
     b = _delivery_broker(tmp_path)
-    b._transport.send_message = AsyncMock(side_effect=RuntimeError("wedged forever"))
+    b._transport.send_message = AsyncMock(side_effect=DeliveryNotAcceptedError("wedged forever"))
 
     await b._dispatch_browser_message({"content": "this will fail", "request_id": "rq-2"})
     await _settle_delivery()

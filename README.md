@@ -197,15 +197,23 @@ See the [configuration reference](https://niuulabs.github.io/volundr/reference/c
 ## Testing
 
 ```bash
-# Backend (85% coverage enforced)
+# Backend unit tests
 uv run pytest tests/ -v
 
-# Web UI (85% coverage enforced)
-cd web && npm run test:coverage
+# Forge contracts, recovery faults, and the 85% Skuld coverage gate
+make test-forge
+make test-forge-tmux
+
+# Web UI and coverage
+cd web-next && pnpm test
 
 # Lint
 uv run ruff check src/ tests/
 ```
+
+See the [Forge stability review](docs/testing/forge-stability-review-2026-09-07.md)
+for findings and the [test workflow](docs/testing/forge-stability-workflow.md) for
+database, Chromium, repeated tmux, and explicit live-provider checks.
 
 ## Deployment
 
@@ -260,3 +268,9 @@ Full documentation at [niuulabs.github.io/volundr](https://niuulabs.github.io/vo
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
+
+Forge's [live agentic acceptance plan](docs/testing/forge-live-agentic-acceptance.md)
+drives real Claude/tmux and Codex sessions through tool use, search, workers,
+questions, reconnects, and background capture. Run `make test-forge-live` against
+a configured local platform; use `make forge-trace-lab` to replay reviewed traces
+without provider calls. Legacy Claude SDK modes remain compatibility coverage.

@@ -580,6 +580,7 @@ def build_root_app(
         # target in single-process/local mode.
         key=lambda item: (item[0] == "guild", item[0]),
     )
+    startup_failures: set[str] = set()
     for name, plugin in plugin_order:
         if name not in requested_plugins:
             continue
@@ -601,6 +602,7 @@ def build_root_app(
                 embedded_forge_app = sub_app
             sub_apps.append((name, sub_app))
         except Exception:
+            startup_failures.add(name)
             logger.exception("Failed to create API app for plugin: %s", name)
 
     @asynccontextmanager
@@ -621,6 +623,7 @@ def build_root_app(
                     started_app_ids.add(app_id)
                     logger.info("Started %s lifespan", name)
                 except Exception:
+                    startup_failures.add(name)
                     logger.exception("Failed to start %s lifespan", name)
 
         yield
@@ -655,9 +658,20 @@ def build_root_app(
         ", ".join(f"{item.name}[{item.source}]" for item in route_inventory) or "(none)",
     )
 
+    from niuu.build_identity import build_identity
+
+    identity = build_identity()
+
     @root.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> Response:
+        return JSONResponse(
+            {
+                "status": "degraded" if startup_failures else "ok",
+                **identity,
+                "failed_plugins": sorted(startup_failures),
+            },
+            status_code=503 if startup_failures else 200,
+        )
 
     prefix_apps: list[tuple[str, ASGIApp]] = []
     for name, sub_app in sub_apps:
@@ -699,11 +713,16 @@ def build_root_app(
             """Proxy browser WebSocket to the Skuld subprocess."""
             port = skuld_reg.get_port(session_id)
             if port is None:
-                # No live port — the broker is gone. Reconcile the row so a stale
-                # RUNNING tombstone self-heals, then close with a deterministic
-                # "session gone" code (4410) the client can branch on.
-                await skuld_reg.reconcile_dead(session_id)
-                await websocket.close(code=4410, reason="Session is no longer running")
+                # A create/resume advertises its URL before a broker binds. Only
+                # pod-authoritative death is terminal; unknown/startup is retryable.
+                confirmed_dead = await skuld_reg.reconcile_dead(session_id)
+                await websocket.accept()
+                await websocket.close(
+                    code=4410 if confirmed_dead else 4411,
+                    reason="Session is no longer running"
+                    if confirmed_dead
+                    else "Session is starting; retry",
+                )
                 return
 
             await websocket.accept()
@@ -776,14 +795,18 @@ def build_root_app(
                 # the session is dead (STOPPED/FAILED) do we drop the registered
                 # port — otherwise a transient broker-leg blip on a still-RUNNING
                 # pod would orphan a live session at port-is-None forever (M-8). The
-                # browser is always closed with 4410 so it can branch/retry; on a
-                # transient blip the retained port lets the very next connect succeed.
+                # A transient blip closes with 4411 and retains the registered port.
                 if not connected:
                     confirmed_dead = await skuld_reg.reconcile_dead(session_id)
                     if confirmed_dead:
                         skuld_reg.unregister(session_id)
                     with suppress(Exception):
-                        await websocket.close(code=4410, reason="Session is no longer running")
+                        await websocket.close(
+                            code=4410 if confirmed_dead else 4411,
+                            reason="Session is no longer running"
+                            if confirmed_dead
+                            else "Session is starting; retry",
+                        )
                     return
                 with suppress(Exception):
                     await websocket.close()

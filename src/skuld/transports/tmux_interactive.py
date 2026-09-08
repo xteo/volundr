@@ -30,6 +30,8 @@ from typing import Any
 from niuu.build_info import build_info
 from niuu.ports.cli import CLITransport, TransportCapabilities
 from skuld.agent_usage import AgentUsageTracker
+from skuld.control_errors import ControlRecoveryError
+from skuld.delivery_errors import DeliveryNotAcceptedError
 from skuld.transports.claude_env import claude_spawn_env
 from skuld.transports.mcp_config import build_claude_mcp_config
 from skuld.transports.subprocess import _DEFAULT_PERMISSION_MODE
@@ -226,6 +228,13 @@ class TmuxInteractiveTransport(CLITransport):
         # is what `claude --resume` accepts; reporting the tmux name as cli_session_id made
         # every resume-aware restart silently start a FRESH conversation (2026-07-13).
         self._claude_native_session_id: str | None = None
+        if self._resume_session_id:
+            try:
+                self._claude_native_session_id = str(uuid.UUID(self._resume_session_id))
+            except ValueError:
+                # Legacy launch hints sometimes contain a tmux name. It is not
+                # a native conversation identity and must never be persisted as one.
+                pass
 
         self._session_name = self._safe_name(f"skuld-{self._forge_session_id}")[:80]
         base_socket_dir = Path(
@@ -382,6 +391,7 @@ class TmuxInteractiveTransport(CLITransport):
         # client can answer structurally; we translate the choice back into pane keystrokes. Popped
         # on answer; cleared when the turn finishes.
         self._pending_tty_prompts: dict[str, dict[str, Any]] = {}
+        self._answer_lock = asyncio.Lock()
         self._tty_question_seq = 0
         self._last_result: dict | None = None
         self._slash_commands_cache = self._normalize_slash_command_items(
@@ -421,10 +431,10 @@ class TmuxInteractiveTransport(CLITransport):
 
     @property
     def session_id(self) -> str | None:
-        # Prefer the captured claude-native conversation id (resume-capable); the tmux
-        # session name is only a fallback identity for sessions that never correlated a
-        # prompt (e.g. driven exclusively from claude.ai — nothing pasted by the broker).
-        return self._claude_native_session_id or self._session_name
+        # A resumed conversation is known before its first prompt. Fresh sessions
+        # stay unknown until a correlated native hook proves the identity; the
+        # tmux process name cannot be passed to Claude's resume command.
+        return self._claude_native_session_id
 
     @property
     def last_result(self) -> dict | None:
@@ -459,7 +469,13 @@ class TmuxInteractiveTransport(CLITransport):
         return result.stdout or ""
 
     def _repl_looks_ready(self, text: str) -> bool:
+        if self._workspace_trust_pending(text):
+            return False
         return any(marker and marker in text for marker in self._repl_ready_markers)
+
+    @staticmethod
+    def _workspace_trust_pending(text: str) -> bool:
+        return "Yes, I trust this folder" in text and "Accessing workspace:" in text
 
     async def _wait_for_repl_ready(self) -> None:
         """Bound-poll the pane until the CLI's input prompt has rendered, so the seed
@@ -467,7 +483,10 @@ class TmuxInteractiveTransport(CLITransport):
         timeout even if no marker appears, so a marker change never wedges startup."""
         deadline = time.monotonic() + max(self._repl_ready_timeout_s, 0.0)
         while time.monotonic() < deadline:
-            if self._repl_looks_ready(await self._capture_pane_text()):
+            text = await self._capture_pane_text()
+            if self._workspace_trust_pending(text):
+                raise RuntimeError("Workspace trust requires confirmation in the terminal")
+            if self._repl_looks_ready(text):
                 return
             await asyncio.sleep(self._menu_poll_step_s)
 
@@ -732,13 +751,17 @@ class TmuxInteractiveTransport(CLITransport):
                 self._deliver_timeout_s,
                 preview,
             )
-            raise RuntimeError(
+            raise DeliveryNotAcceptedError(
                 "steering message not delivered: the session input channel has been "
                 f"busy for >{self._deliver_timeout_s:.0f}s (prior delivery stuck)"
             ) from exc
         try:
             if not self.is_alive:
                 await self._ensure_started()
+            if self._workspace_trust_pending(await self._capture_pane_text()):
+                raise DeliveryNotAcceptedError(
+                    "Workspace trust requires confirmation in the terminal"
+                )
             if self._turn_active:
                 # Mid-turn steer: keep the SAME turn alive. Refresh the idle
                 # clock so the completion watchdog doesn't fire in the gap
@@ -1022,6 +1045,8 @@ class TmuxInteractiveTransport(CLITransport):
             return True
 
         if event_name == "Stop":
+            if self._is_child_hook(payload):
+                return True
             await self._finish_hook_turn(
                 content=self._coerce_str(payload.get("last_assistant_message")),
                 reason="stop",
@@ -1029,6 +1054,8 @@ class TmuxInteractiveTransport(CLITransport):
             return True
 
         if event_name == "StopFailure":
+            if self._is_child_hook(payload):
+                return True
             await self._finish_hook_turn(
                 content=(
                     self._coerce_str(payload.get("last_assistant_message"))
@@ -1051,6 +1078,16 @@ class TmuxInteractiveTransport(CLITransport):
             or "unknown"
         )
         return str(event_name)
+
+    def _is_child_hook(self, payload: dict[str, Any]) -> bool:
+        if payload.get("is_sidechain") or payload.get("isSidechain"):
+            return True
+        if payload.get("agent_id") or payload.get("agentId"):
+            return True
+        native = self._coerce_str(payload.get("session_id"))
+        return bool(
+            native and self._claude_native_session_id and native != self._claude_native_session_id
+        )
 
     def _mark_semantic_turn_started(self) -> None:
         if self._turn_active:
@@ -1083,9 +1120,7 @@ class TmuxInteractiveTransport(CLITransport):
         # Sidechain (subagent) prose has no top-level anchor in the main flow — skip it
         # (subagent tool frames already nest via parent attribution; prose attribution is
         # a separate feature).
-        if payload.get("is_sidechain") or payload.get("isSidechain"):
-            return
-        if self._coerce_str(payload.get("agent_id")) or self._coerce_str(payload.get("agentId")):
+        if self._is_child_hook(payload):
             return
         delta = payload.get("delta")
         if not isinstance(delta, str) or not delta:
@@ -1481,6 +1516,7 @@ class TmuxInteractiveTransport(CLITransport):
             ],
             "multiSelect": False,
         }
+        self._cancel_submit_confirmations()
         self._pending_tty_prompts[request_id] = {"kind": "permission", "tool_name": tool_name}
         await self._emit_ask_user_question(request_id, [question])
 
@@ -1495,6 +1531,7 @@ class TmuxInteractiveTransport(CLITransport):
         if not isinstance(questions, list) or not questions:
             return
         request_id = self._next_tty_request_id()
+        self._cancel_submit_confirmations()
         self._pending_tty_prompts[request_id] = {"kind": "question", "questions": questions}
         await self._emit_ask_user_question(request_id, questions)
 
@@ -1529,6 +1566,12 @@ class TmuxInteractiveTransport(CLITransport):
     async def _answer_tty_prompt(
         self, request_id: str | None, answers: object, *, pane_id: str | None = None
     ) -> None:
+        async with self._answer_lock:
+            await self._answer_tty_prompt_locked(request_id, answers, pane_id=pane_id)
+
+    async def _answer_tty_prompt_locked(
+        self, request_id: str | None, answers: object, *, pane_id: str | None = None
+    ) -> None:
         """Translate a structured `ask_user_answer` into the keystroke that drives the TTY menu.
 
         Robust by design: DENY is always `Escape` (cancels any menu shape); ALLOW/option selection
@@ -1536,37 +1579,38 @@ class TmuxInteractiveTransport(CLITransport):
         2- vs 3-row menus). For the AskUserQuestion tool we confirm the digit with Enter (its
         select-list needs it); a permission gate acts on the digit alone.
         """
-        pending = self._pending_tty_prompts.pop(request_id, None) if request_id else None
+        pending = self._pending_tty_prompts.get(request_id) if request_id else None
         if pending is None:
-            # Stale/unknown id (e.g. answered in-terminal). If exactly one prompt is pending, answer
-            # that; otherwise no-op rather than guess.
-            if len(self._pending_tty_prompts) == 1:
-                request_id, pending = self._pending_tty_prompts.popitem()
-            else:
-                return
+            raise ValueError("Unknown or already answered Claude question")
+        if pending.get("answer_uncertain"):
+            raise ControlRecoveryError(
+                "The previous answer may have reached Claude. Inspect the native session "
+                "before answering again."
+            )
 
         chosen = self._first_answer_text(answers)
+        if not chosen.strip():
+            raise ValueError("Claude question requires an explicit answer")
         kind = pending.get("kind")
 
         if kind == "permission" and self._is_deny_answer(chosen):
+            pending["answer_uncertain"] = True
             await self._send_key("Escape", pane_id=pane_id)
+            self._pending_tty_prompts.pop(request_id, None)
             await self._emit_ask_user_resolved(request_id, "deny")
             return
 
         rows = await self._capture_menu_rows_wait(pane_id=pane_id)
         digit = self._match_menu_digit(chosen, rows)
         if digit is None:
-            # No matching numbered row. The affirmative row is the highlighted default, so Enter
-            # accepts it; for a question fall back to the first option then confirm.
-            if kind == "permission":
-                await self._send_key("Enter", pane_id=pane_id)
-            else:
-                await self._send_key("1", pane_id=pane_id)
-                await self._send_key("Enter", pane_id=pane_id)
-        else:
-            await self._send_key(str(digit), pane_id=pane_id)
-            if kind == "question":
-                await self._send_key("Enter", pane_id=pane_id)
+            raise ValueError("The requested answer does not match the live Claude menu")
+        # A key-send failure may occur after tmux consumed the key. Retain the
+        # question evidence but reject retries until native completion/reissue.
+        pending["answer_uncertain"] = True
+        await self._send_key(str(digit), pane_id=pane_id)
+        if kind == "question":
+            await self._send_key("Enter", pane_id=pane_id)
+        self._pending_tty_prompts.pop(request_id, None)
         await self._emit_ask_user_resolved(request_id, chosen or "answered")
 
     async def _capture_menu_rows_wait(self, *, pane_id: str | None = None) -> list[tuple[int, str]]:
@@ -1661,13 +1705,16 @@ class TmuxInteractiveTransport(CLITransport):
             return answers
         return ""
 
-    async def _emit_ask_user_resolved(self, request_id: str | None, decision: str) -> None:
+    async def _emit_ask_user_resolved(
+        self, request_id: str | None, decision: str, *, accepted: bool = True
+    ) -> None:
         await self._emit(
             {
                 "type": "ask_user_resolved",
                 "event_type": "ask_user.resolved",
                 "request_id": request_id or "",
                 "decision": decision,
+                "accepted": accepted,
                 "metadata": {"source": "tmux_tty_bridge"},
             }
         )
@@ -1680,7 +1727,7 @@ class TmuxInteractiveTransport(CLITransport):
         stale = list(self._pending_tty_prompts.keys())
         self._pending_tty_prompts.clear()
         for request_id in stale:
-            await self._emit_ask_user_resolved(request_id, reason)
+            await self._emit_ask_user_resolved(request_id, reason, accepted=False)
 
     async def _finish_hook_turn(
         self,
@@ -2392,6 +2439,12 @@ class TmuxInteractiveTransport(CLITransport):
     # send-is-non-blocking contract only pays the first hop (a cleared composer exits the loop).
     _SUBMIT_RETRY_DELAYS_S = (0.25, 0.6, 1.2)
 
+    def _cancel_submit_confirmations(self) -> None:
+        # The hook precedes the rendered menu. An Enter retry during that window
+        # is buffered by the TTY and answers the upcoming question with its default.
+        for task in list(self._confirm_submit_tasks):
+            task.cancel()
+
     async def _confirm_submit(self, text: str, target: str) -> None:
         """Re-press Enter (bounded) while the pasted text still sits in the composer.
 
@@ -2412,6 +2465,8 @@ class TmuxInteractiveTransport(CLITransport):
         needle = needle[-60:]
         for delay in self._SUBMIT_RETRY_DELAYS_S:
             await asyncio.sleep(delay)
+            if self._pending_tty_prompts:
+                return
             state = await self._composer_state(needle, target)
             if state != "holds":
                 return

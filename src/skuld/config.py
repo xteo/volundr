@@ -348,7 +348,7 @@ class SkuldSettings(BaseSettings):
     )
 
     session: SkuldSessionConfig = Field(default_factory=SkuldSessionConfig)
-    cli_type: str = Field(default="claude")  # "claude" | "codex" | "grok"
+    cli_type: str = Field(default="claude")  # "claude" | "codex" | "grok" | "muse"
     transport: str = Field(default="sdk")  # claude only: "sdk" | "subprocess"
     transport_adapter: str = Field(default=_DEFAULT_TRANSPORT_ADAPTER)
     skip_permissions: bool = Field(default=False)
@@ -393,6 +393,19 @@ class SkuldSettings(BaseSettings):
     event_log_batch_size: int = Field(default=100)
     event_log_flush_interval_ms: int = Field(default=500)
     event_log_max_buffer: int = Field(default=50_000)
+    # Native-session recovery restores the durable transcript before the CLI
+    # starts, so reconnect snapshots include the imported conversation prefix.
+    history_hydration_enabled: bool = Field(default=True)
+    history_hydration_timeout_seconds: float = Field(default=30.0, gt=0)
+    history_hydration_page_size: int = Field(default=1000, ge=1, le=5000)
+    history_hydration_max_frames: int = Field(default=100_000, ge=1)
+    history_hydration_max_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
+    # Leave room below clients with a 1 MiB WebSocket receive limit. Large
+    # reconnect histories use the existing lazy tool-result preview contract.
+    conversation_snapshot_max_bytes: int = Field(default=900 * 1024, gt=0)
+    live_frame_max_bytes: int = Field(default=900 * 1024, ge=1024)
+    # Native results are retained whole before the browser projection elides them.
+    codex_receive_max_bytes: int = Field(default=16 * 1024 * 1024, ge=1024)
     # Unified internal-visibility default for a freshly-connected live channel
     # (SRD FR-7 / INV-10). The read paths thread the SAME configured default
     # (``ReplayConfig.default_show_internal`` in volundr); a live ``WebSocketChannel``
@@ -401,7 +414,7 @@ class SkuldSettings(BaseSettings):
     # Default ``False`` (internal tool_use/tool_result HIDDEN), matching ReplayConfig.
     default_show_internal: bool = Field(default=False)
     max_upload_size_bytes: int = Field(default=104_857_600)  # 100 MB
-    acp_prompt_timeout_s: float = Field(default=300.0)  # ACP (Grok Build) prompt turn timeout
+    acp_prompt_timeout_s: float = Field(default=300.0)  # ACP/MSP (Grok Build, Muse) turn timeout
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     reflex: ReflexConfig = Field(default_factory=ReflexConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -435,6 +448,9 @@ class SkuldSettings(BaseSettings):
 
         if self.cli_type == "grok":
             self.transport_adapter = "skuld.transports.grok.GrokACPTransport"
+            return self
+        if self.cli_type == "muse":
+            self.transport_adapter = "skuld.transports.muse.MuseMSPTransport"
             return self
 
         if self.transport == "subprocess":

@@ -86,6 +86,7 @@ def _resolved_frames(frames: list[dict]) -> list[dict]:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e1_question_surfaces_to_frontend_and_is_tracked() -> None:
     """E1: an ask: surfaces a structured ask_user_question to the client + is tracked.
@@ -144,6 +145,7 @@ async def test_e1_question_surfaces_to_frontend_and_is_tracked() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e1b_ask_user_question_flips_session_to_awaiting_input() -> None:
     """E1b: an AskUserQuestion gate must pin the session at awaiting_input.
@@ -183,6 +185,7 @@ async def test_e1b_ask_user_question_flips_session_to_awaiting_input() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e2_answer_translates_to_right_digit_and_resolves() -> None:
     """E2: answering the non-default option presses the matched digit + Enter.
@@ -247,6 +250,7 @@ async def test_e2_answer_translates_to_right_digit_and_resolves() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e3_menu_not_yet_rendered_race_waits_for_menu() -> None:
     """E3: answering before the menu renders must still press the CHOSEN digit.
@@ -292,6 +296,7 @@ async def test_e3_menu_not_yet_rendered_race_waits_for_menu() -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 @pytest.mark.xfail(
     strict=True,
@@ -356,6 +361,7 @@ def _key_sends(frames: list[dict]) -> list[str]:
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e5_deny_path_sends_escape_not_a_digit() -> None:
     """E5: choosing Deny on a permission gate sends Escape and resolves deny.
@@ -511,6 +517,7 @@ async def test_e6_sdk_emits_same_ask_user_question_shape_and_resolves(tmp_path) 
 
 
 @pytest.mark.integration
+@pytest.mark.tmux
 @pytest.mark.asyncio
 async def test_e7_turn_end_clears_stale_prompt_and_does_not_replay() -> None:
     """E7: an unanswered question is cleared on turn end and not replayed later.

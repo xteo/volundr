@@ -698,6 +698,7 @@ class TestEventNormalization:
             }
         )
 
+        await t._compaction_task
         t._send_rpc.assert_awaited_once_with(
             "thread/compact/start",
             {"threadId": "thread-1"},
@@ -1426,7 +1427,7 @@ class TestApprovals:
         assert event["type"] == "control_request"
         assert event["tool"] == "Bash"
         assert event["input"]["command"] == "rm -rf /tmp/test"
-        assert "42" in t._pending_approvals
+        assert event["request_id"] in t._pending_approvals
 
     @pytest.mark.asyncio
     async def test_file_change_approval(self, tmp_path):
@@ -1444,7 +1445,7 @@ class TestApprovals:
         event = emit.call_args[0][0]
         assert event["type"] == "control_request"
         assert event["tool"] == "Edit"
-        assert "99" in t._pending_approvals
+        assert event["request_id"] in t._pending_approvals
 
     @pytest.mark.asyncio
     async def test_exec_command_approval_uses_review_decision_shape(self, tmp_path):
@@ -1473,7 +1474,7 @@ class TestApprovals:
         assert event["tool"] == "Bash"
         assert event["input"]["command"] == "/bin/zsh -lc 'echo hi'"
 
-        await t.send_control_response("43", {"behavior": "allow"})
+        await t.send_control_response(event["request_id"], {"behavior": "allow"})
 
         sent = json.loads(t._ws.sent[0])
         assert sent["id"] == 43
@@ -2685,12 +2686,13 @@ class TestResumeEdgeCases:
 
 class TestSendControlResponseEdgeCases:
     @pytest.mark.asyncio
-    async def test_unknown_request_id_logs_warning(self, tmp_path):
-        """Responding to an unknown request_id should be a no-op (warning logged)."""
+    async def test_unknown_request_id_is_explicitly_rejected(self, tmp_path):
+        """A stale approval must fail visibly without replying to another RPC."""
         t = _make_transport(tmp_path)
         t._ws = FakeWebSocket()
 
-        await t.send_control_response("nonexistent", {"behavior": "allow"})
+        with pytest.raises(ValueError, match="Unknown or already answered"):
+            await t.send_control_response("nonexistent", {"behavior": "allow"})
 
         # Nothing sent
         assert len(t._ws.sent) == 0

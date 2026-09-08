@@ -91,16 +91,19 @@ const DEFINITION_RUNES: Record<string, string> = {
   skuldGemini: '\u16C7',
   skuldAider: '\u16A8',
   skuldOpenCode: '\u16A0',
+  skuldMuse: '\u16D8',
   'skuld-claude': '\u16D7',
   'skuld-claude-interactive': '\u16D7',
   'skuld-codex': '\u16B2',
   'skuld-gemini': '\u16C7',
   'skuld-aider': '\u16A8',
+  'skuld-muse': '\u16D8',
   // Legacy short keys
   claude: '\u16D7',
   codex: '\u16B2',
   gemini: '\u16C7',
   aider: '\u16A8',
+  muse: '\u16D8',
 };
 
 const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
@@ -127,6 +130,14 @@ const FALLBACK_SESSION_DEFINITIONS: SessionDefinition[] = [
     labels: [],
     defaultModel: '',
     compatibleProviders: ['openai'],
+  },
+  {
+    key: 'skuldMuse',
+    displayName: 'Meta Muse Code',
+    description: '',
+    labels: [],
+    defaultModel: 'muse-spark-1.3',
+    compatibleProviders: ['meta'],
   },
   {
     key: 'skuldGemini',
@@ -158,12 +169,14 @@ export function normalizeDefinitionKey(definitionKey: string): string {
     gemini: 'skuldGemini',
     aider: 'skuldAider',
     opencode: 'skuldOpenCode',
+    muse: 'skuldMuse',
     'skuld-claude': 'skuldClaude',
     'skuld-claude-interactive': 'skuldClaudeInteractive',
     'skuld-codex': 'skuldCodex',
     'skuld-gemini': 'skuldGemini',
     'skuld-aider': 'skuldAider',
     'skuld-opencode': 'skuldOpenCode',
+    'skuld-muse': 'skuldMuse',
   };
   return legacyMap[normalized] ?? normalized;
 }
@@ -178,6 +191,7 @@ export function deriveCliTool(definitionKey: string): string {
     skuldGemini: 'gemini',
     skuldAider: 'aider',
     skuldOpenCode: 'opencode',
+    skuldMuse: 'muse',
   };
   if (normalized in cliToolMap) return cliToolMap[normalized]!;
   if (normalized.startsWith('skuld-')) return normalized.slice('skuld-'.length);
@@ -193,6 +207,7 @@ export function definitionToTaskType(definitionKey: string): string {
     skuldGemini: 'skuld-gemini',
     skuldAider: 'skuld-aider',
     skuldOpenCode: 'skuld-opencode',
+    skuldMuse: 'skuld-muse',
   };
   return taskTypeMap[normalized] ?? normalized;
 }
@@ -287,6 +302,8 @@ function normalizeModelProvider(value: string | undefined | null): string {
     codex: 'openai',
     google: 'google',
     gemini: 'google',
+    meta: 'meta',
+    muse: 'meta',
     ollama: 'local',
     local: 'local',
   };

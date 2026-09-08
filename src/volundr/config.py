@@ -405,6 +405,26 @@ def _default_session_definitions() -> dict[str, SessionDefinitionConfig]:
                 },
             },
         ),
+        "skuldMuse": SessionDefinitionConfig(
+            enabled=True,
+            display_name="Meta Muse Code",
+            description=(
+                "Meta Muse Code — Muse Session Protocol (MSP) over stdio (Scaldy pipeline); "
+                "native mid-turn steering, durable resumable sessions, real token usage"
+            ),
+            labels=["session", "muse"],
+            # Muse Spark 1.3 shipped 2026-09-02 and is what `muse` serves by default in
+            # Muse Code 1.0.2; the id is exactly what the Meta Model API accepts.
+            default_model="muse-spark-1.3",
+            compatible_providers=["meta"],
+            defaults={
+                "broker": {
+                    "cliType": "muse",
+                    "transportAdapter": "skuld.transports.muse.MuseMSPTransport",
+                    "agentTeams": False,
+                },
+            },
+        ),
         "skuldOpenCode": SessionDefinitionConfig(
             enabled=True,
             display_name="OpenCode",

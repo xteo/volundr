@@ -23,6 +23,7 @@ Run them explicitly:
 """
 
 import asyncio
+import os
 import shutil
 import subprocess
 
@@ -31,7 +32,7 @@ import pytest
 from skuld.transports import GrokACPTransport
 from skuld.transports.grok import GROK_DEFAULT_MODEL
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.e2e, pytest.mark.live_cli, pytest.mark.usefixtures("grok_preflight")]
 
 
 def _grok_available() -> tuple[bool, str]:
@@ -50,24 +51,29 @@ def _grok_available() -> tuple[bool, str]:
     return True, blob
 
 
-_USABLE, _WHY = _grok_available()
-requires_grok = pytest.mark.skipif(not _USABLE, reason=f"Grok E2E unavailable: {_WHY}")
+@pytest.fixture(scope="module")
+def grok_preflight():
+    # Never start CLIs or contact a provider during test collection.
+    if os.environ.get("FORGE_LIVE_CLI") != "1":
+        pytest.skip("set FORGE_LIVE_CLI=1 to opt into real provider tests")
+    usable, detail = _grok_available()
+    if not usable:
+        pytest.fail(f"Grok live gate prerequisite failed: {detail}")
+    return detail
 
 
-@requires_grok
-def test_the_configured_default_model_actually_exists():
+def test_the_configured_default_model_actually_exists(grok_preflight):
     """The regression that took Grok down, asserted against the live catalogue.
 
     `grok models` is the only authority on model ids. Our default must appear in
     it — a wrong id fails at session start with `unknown model id` and, because
     the CLI still exits 0, reads as a clean run all the way up the stack.
     """
-    assert GROK_DEFAULT_MODEL in _WHY, (
-        f"default model {GROK_DEFAULT_MODEL!r} is not in `grok models`:\n{_WHY}"
+    assert GROK_DEFAULT_MODEL in grok_preflight, (
+        f"default model {GROK_DEFAULT_MODEL!r} is not in `grok models`:\n{grok_preflight}"
     )
 
 
-@requires_grok
 def test_an_unknown_model_id_is_rejected_with_a_nonzero_exit():
     """An unknown model id fails loudly: clear message AND a non-zero exit.
 
@@ -85,7 +91,6 @@ def test_an_unknown_model_id_is_rejected_with_a_nonzero_exit():
     assert out.returncode != 0, "an unknown model must fail the process, not pass silently"
 
 
-@requires_grok
 def test_real_turn_yields_paired_tool_calls_with_ids_and_timing(tmp_path):
     """One real tool-using turn, asserted the way hierarchical mode consumes it.
 
@@ -165,7 +170,6 @@ def test_real_turn_yields_paired_tool_calls_with_ids_and_timing(tmp_path):
     assert "ready" in (tmp_path / "e2e.txt").read_text().lower()
 
 
-@requires_grok
 def test_real_turn_streams_reasoning_separately_from_the_answer(tmp_path):
     """Thinking must land as thinking_delta, never inlined into the answer text.
 
