@@ -8,10 +8,14 @@ import json
 import pytest
 
 from tests.test_skuld.test_tmux_interactive_transport import (
-    FakeTmuxInteractiveTransport,
     _ask_user_questions,
     _collect_events,
     _send_keys,
+)
+from tests.test_skuld.test_tmux_native_question_consumption import (
+    NATIVE_ID,
+    TOOL_ID,
+    NativeQuestionTransport,
 )
 
 QUESTIONS = [
@@ -44,7 +48,7 @@ PERMISSION_MENU = """Do you want to proceed?
 
 @pytest.fixture
 async def bridge(tmp_path):
-    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    transport = NativeQuestionTransport(str(tmp_path))
     events = await _collect_events(transport)
     await transport.start()
     try:
@@ -59,7 +63,9 @@ async def hook(transport, event, *, tool="AskUserQuestion", questions=None):
             "hook_event_name": event,
             "tool_name": tool,
             "tool_input": {"questions": QUESTIONS if questions is None else questions},
-            "tool_use_id": "toolu_catalog_accent",
+            "tool_use_id": TOOL_ID,
+            "session_id": NATIVE_ID,
+            "transcript_path": str(transport.native_path),
         }
     )
 
@@ -84,12 +90,14 @@ async def test_catalog_permission_rejects_unlisted_answer_before_any_keys(bridge
     assert transport.commands == before  # No capture or terminal write for invalid input.
     assert not any(e.get("type") == "ask_user_resolved" for e in events)
 
+    transport.steps.append(("2", "❯\n"))
+    transport.consumed = {"answers": {QUESTIONS[0]["question"]: "Amber"}}
     await transport.send_control(
         "ask_user_answer", request_id=actual["request_id"], answers=[{"answer": "amber"}]
     )
-    assert _send_keys(transport) == ["2", "Enter"]
+    assert _send_keys(transport) == ["2"]
     resolved = [e for e in events if e.get("type") == "ask_user_resolved"]
-    assert [(e["request_id"], e["decision"]) for e in resolved] == [(actual["request_id"], "amber")]
+    assert [(e["request_id"], e["decision"]) for e in resolved] == [(actual["request_id"], "Amber")]
     assert permission["request_id"] in transport._pending_tty_prompts
 
 
@@ -102,11 +110,13 @@ async def test_catalog_bypass_duplicate_has_one_card_and_one_receipt(bridge):
     questions = _ask_user_questions(events)
     assert len(questions) == 1
     assert any(e.get("type") == "claude_permission_request" for e in events)
+    transport.steps.append(("2", "❯\n"))
+    transport.consumed = {"answers": {QUESTIONS[0]["question"]: "Amber"}}
     await transport.send_control(
         "ask_user_answer", request_id=questions[0]["request_id"], answers=[{"answer": "Amber"}]
     )
     await hook(transport, "PostToolUse")
-    assert _send_keys(transport) == ["2", "Enter"]
+    assert _send_keys(transport) == ["2"]
     assert len([e for e in events if e.get("type") == "ask_user_resolved"]) == 1
 
 
@@ -160,6 +170,7 @@ async def test_permission_options_survive_json_roundtrip_and_select_native_row(
     assert pending["questions"] == frame["questions"]
     assert pending["kind"] == frame["metadata"]["control_kind"]
     transport._pending_tty_prompts[rid] = pending
+    transport.steps.append((keys[0], "❯\n"))
     await transport.send_control("ask_user_answer", request_id=rid, answers=[{"answer": answer}])
     assert _send_keys(transport) == keys
 
@@ -205,11 +216,24 @@ async def test_native_other_row_preserves_explicit_free_text(bridge, freeform_ki
         transport.capture_stdout = QUESTION_MENU
     else:
         questions[0]["options"] = []
-        transport.capture_stdout = "❯ 1. Type something.\n"
+        transport.capture_stdout = (
+            "☐ Accent\n" + questions[0]["question"] + "\n❯ 1. Type something.\n"
+        )
     await hook(transport, "PreToolUse", questions=questions)
     rid = _ask_user_questions(events)[0]["request_id"]
+    digit = "3" if freeform_kind == "explicit" else "1"
+    editor = (
+        transport.capture_stdout.replace("❯ 1. Blue", "  1. Blue").replace(
+            f"  {digit}. Type something.", f"❯ {digit}. Type something."
+        )
+        + "\nctrl+g to edit in Vim\n"
+    )
+    transport.steps.extend(
+        [(digit, editor), ("paste", editor.replace("Type something.", text)), ("Enter", "❯\n")]
+    )
+    transport.consumed = {"answers": {questions[0]["question"]: text}}
     await transport.send_control("ask_user_answer", request_id=rid, answers=[answer])
-    assert _send_keys(transport) == ["3" if freeform_kind == "explicit" else "1", "Enter", "Enter"]
+    assert _send_keys(transport) == [digit, "Enter"]
     assert transport.loaded_buffers == [text]
     assert not transport._confirm_submit_tasks
     resolved = [e for e in events if e.get("type") == "ask_user_resolved"]
@@ -230,7 +254,7 @@ async def test_non_option_is_not_silently_treated_as_free_text(bridge, answer):
     transport.capture_stdout = QUESTION_MENU
     await hook(transport, "PreToolUse")
     rid = _ask_user_questions(events)[0]["request_id"]
-    with pytest.raises(ValueError, match="declared Claude question option"):
+    with pytest.raises(ValueError, match="declared Claude question option|custom text disagrees"):
         await transport.send_control("ask_user_answer", request_id=rid, answers=[answer])
     assert _send_keys(transport) == []
     assert transport.loaded_buffers == []
@@ -257,6 +281,7 @@ async def test_allow_cannot_silently_select_broader_native_grant(bridge, plain):
     transport.capture_stdout = f"❯ 1. {plain}\n  2. Yes, allow for this session\n  3. No\n"
     await hook(transport, "PermissionRequest")
     rid = _ask_user_questions(events)[0]["request_id"]
+    transport.steps.append(("1", "❯\n"))
     await transport.send_control("ask_user_answer", request_id=rid, answers=[{"answer": "Allow"}])
     assert _send_keys(transport) == ["1"]
 

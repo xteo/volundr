@@ -21,10 +21,12 @@ import signal
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from niuu.build_info import build_info
@@ -269,6 +271,13 @@ class TmuxInteractiveTransport(CLITransport):
         # Poll cadence while waiting for the menu to render (capped by the pane poll
         # interval). Config-driven so there is no bare literal in the wait loop.
         self._menu_poll_step_s = self._float_env("SKULD__TMUX_MENU_POLL_STEP_SECONDS", None, 0.1)
+        self._question_result_wait_s = self._float_env(
+            "SKULD__TMUX_QUESTION_RESULT_WAIT_SECONDS", None, 5.0
+        )
+        self._question_transcript_max_bytes = max(
+            1,
+            self._coerce_int(os.environ.get("SKULD__TMUX_QUESTION_TRANSCRIPT_MAX_BYTES"), 1048576),
+        )
         # Initial-prompt fix: the REPL isn't ready to accept input the instant the
         # CLI is spawned — pasting the seed prompt into a still-booting Claude makes
         # it land mid-startup (it was being parsed as a slash command). Wait for a
@@ -392,6 +401,13 @@ class TmuxInteractiveTransport(CLITransport):
         # on answer; cleared when the turn finishes.
         self._pending_tty_prompts: dict[str, dict[str, Any]] = {}
         self._answer_lock = asyncio.Lock()
+        self._question_result_emit_lock = asyncio.Lock()
+        self._question_result_ids: deque[str] = deque(
+            maxlen=max(
+                1,
+                self._coerce_int(os.environ.get("SKULD__TMUX_QUESTION_RESULT_HISTORY_LIMIT"), 128),
+            )
+        )
         self._tty_question_seq = 0
         self._last_result: dict | None = None
         self._slash_commands_cache = self._normalize_slash_command_items(
@@ -758,6 +774,11 @@ class TmuxInteractiveTransport(CLITransport):
         try:
             if not self.is_alive:
                 await self._ensure_started()
+            if self._pending_tty_prompts:
+                raise DeliveryNotAcceptedError(
+                    "Claude is waiting on a native control; answer it before "
+                    "sending another message"
+                )
             if self._workspace_trust_pending(await self._capture_pane_text()):
                 raise DeliveryNotAcceptedError(
                     "Workspace trust requires confirmation in the terminal"
@@ -871,11 +892,12 @@ class TmuxInteractiveTransport(CLITransport):
         if subtype in {"terminal_input", "input"}:
             text = self._coerce_str(kwargs.get("data")) or self._coerce_str(kwargs.get("text"))
             if text:
-                await self._paste_text(
-                    text,
-                    enter=bool(kwargs.get("enter", False)),
-                    pane_id=self._coerce_str(kwargs.get("pane_id")),
-                )
+                async with self._send_lock:
+                    await self._paste_text(
+                        text,
+                        enter=bool(kwargs.get("enter", False)),
+                        pane_id=self._coerce_str(kwargs.get("pane_id")),
+                    )
             return
 
         if subtype in {"terminal_key", "key"}:
@@ -885,32 +907,35 @@ class TmuxInteractiveTransport(CLITransport):
             else:
                 key = self._coerce_str(kwargs.get("key")) or self._coerce_str(raw_keys)
                 keys = [self._normalize_key(key)] if key else []
-            for key in keys:
-                await self._send_key(key, pane_id=self._coerce_str(kwargs.get("pane_id")))
+            async with self._send_lock:
+                for key in keys:
+                    await self._send_key(key, pane_id=self._coerce_str(kwargs.get("pane_id")))
             return
 
         if subtype == "terminal_resize":
             cols = int(kwargs.get("cols") or kwargs.get("columns") or 0)
             rows = int(kwargs.get("rows") or 0)
             if cols > 0 and rows > 0:
-                await self._resize_pane(
-                    cols=cols,
-                    rows=rows,
-                    pane_id=self._coerce_str(kwargs.get("pane_id")),
-                )
+                async with self._send_lock:
+                    await self._resize_pane(
+                        cols=cols,
+                        rows=rows,
+                        pane_id=self._coerce_str(kwargs.get("pane_id")),
+                    )
             return
 
         if subtype in {"slash_command", "terminal_slash_command"}:
             command = self._coerce_str(kwargs.get("command"))
             if command:
-                await self._send_slash_command(
-                    command,
-                    arguments=(
-                        self._coerce_str(kwargs.get("arguments"))
-                        or self._coerce_str(kwargs.get("args"))
-                    ),
-                    pane_id=self._coerce_str(kwargs.get("pane_id")),
-                )
+                async with self._send_lock:
+                    await self._send_slash_command(
+                        command,
+                        arguments=(
+                            self._coerce_str(kwargs.get("arguments"))
+                            or self._coerce_str(kwargs.get("args"))
+                        ),
+                        pane_id=self._coerce_str(kwargs.get("pane_id")),
+                    )
             return
 
         if subtype in {"redirect", "steer"}:
@@ -1177,12 +1202,12 @@ class TmuxInteractiveTransport(CLITransport):
         if not tool_name:
             return
         tool_input = payload.get("tool_input")
+        tool_use_id = self._coerce_str(payload.get("tool_use_id")) or (f"hook-{uuid.uuid4().hex}")
         # CLI-mode questions bridge: the AskUserQuestion tool renders its menu in the TTY. Surface
         # it as a structured `ask_user_question` (its tool_input already carries the questions iOS
         # parses) so a remote client can answer; the tool_use is still emitted below for history.
         if tool_name == "AskUserQuestion" and isinstance(tool_input, dict):
-            await self._surface_tty_ask_user_question(tool_input)
-        tool_use_id = self._coerce_str(payload.get("tool_use_id")) or (f"hook-{uuid.uuid4().hex}")
+            await self._surface_tty_ask_user_question(tool_input, payload=payload)
         # Parent attribution: a NON-Task tool firing while a Task subagent is in flight belongs
         # to that subagent (stack top). The Task tool's OWN tool_use is a main-agent action ->
         # parent stays None. Computed BEFORE the Task push below so a Task never self-references.
@@ -1236,6 +1261,17 @@ class TmuxInteractiveTransport(CLITransport):
         tool_use_id = self._coerce_str(payload.get("tool_use_id"))
         if not tool_use_id:
             return
+        question = next(
+            (
+                pending
+                for pending in self._pending_tty_prompts.values()
+                if pending.get("native_tool_use_id") == tool_use_id
+                and pending.get("native_session_id") == payload.get("session_id")
+            ),
+            None,
+        )
+        if tool_use_id in self._question_result_ids:
+            return
         # Parent attribution: compute BEFORE popping so the Task's OWN result carries parent=None
         # (a main-agent action) while a child result nests under the stack top.
         is_task_result = tool_use_id in self._hook_agents
@@ -1269,18 +1305,26 @@ class TmuxInteractiveTransport(CLITransport):
         if parent_id is not None:
             tool_result_block["parent_tool_use_id"] = parent_id
             tool_result_block["agent_id"] = parent_id
-        await self._emit(
-            {
-                "type": "user",
-                "message": {"content": [tool_result_block]},
-                "metadata": {
-                    "source": "claude_hook",
-                    "hook_event_name": ("PostToolUseFailure" if is_error else "PostToolUse"),
-                    "claude_session_id": payload.get("session_id"),
-                    "transcript_path": payload.get("transcript_path"),
-                },
+        frame = {
+            "type": "user",
+            "message": {"content": [tool_result_block]},
+            "metadata": {
+                "source": "claude_hook",
+                "hook_event_name": ("PostToolUseFailure" if is_error else "PostToolUse"),
+                "claude_session_id": payload.get("session_id"),
+                "transcript_path": payload.get("transcript_path"),
+            },
+        }
+        if question is not None:
+            response = payload.get("tool_response")
+            question["native_result"] = {
+                "is_error": is_error,
+                "answers": response.get("answers") if isinstance(response, dict) else None,
+                "frame": frame,
             }
-        )
+            await self._emit_question_result_once(tool_use_id, frame)
+            return
+        await self._emit(frame)
 
     async def _emit_permission_request_from_hook(self, payload: dict[str, Any]) -> None:
         tool_input = payload.get("tool_input")
@@ -1540,7 +1584,9 @@ class TmuxInteractiveTransport(CLITransport):
         }
         await self._emit_ask_user_question(request_id, [question])
 
-    async def _surface_tty_ask_user_question(self, tool_input: dict[str, Any]) -> None:
+    async def _surface_tty_ask_user_question(
+        self, tool_input: dict[str, Any], *, payload: dict[str, Any] | None = None
+    ) -> None:
         """Surface the AskUserQuestion tool's TTY menu as a structured `ask_user_question`.
 
         `tool_input.questions` is already in the shape iOS parses (header/question/options), so this
@@ -1552,8 +1598,167 @@ class TmuxInteractiveTransport(CLITransport):
             return
         request_id = self._next_tty_request_id()
         self._cancel_submit_confirmations()
-        self._pending_tty_prompts[request_id] = {"kind": "question", "questions": questions}
+        native = self._question_native_identity(payload or {})
+        self._pending_tty_prompts[request_id] = {
+            "kind": "question",
+            "questions": questions,
+            **native,
+        }
         await self._emit_ask_user_question(request_id, questions)
+
+    def _question_native_identity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Bind proof to this main native conversation and this exact tool call.
+
+        The authenticated CLI hook supplies the transcript path. Its basename
+        must identify the native session; inode/offset anchoring below prevents
+        an old result or a replaced file from confirming a new answer.
+        """
+        tool_id = self._coerce_str(payload.get("tool_use_id"))
+        native_id = self._coerce_str(payload.get("session_id"))
+        if not tool_id or not native_id or native_id != self._claude_native_session_id:
+            return {}
+        try:
+            native_id = str(uuid.UUID(native_id))
+        except ValueError:
+            return {}
+        result: dict[str, Any] = {
+            "native_tool_use_id": tool_id,
+            "native_session_id": native_id,
+        }
+        path_text = self._coerce_str(payload.get("transcript_path"))
+        if not path_text:
+            return result
+        path = Path(path_text)
+        if not path.is_absolute() or path.name != f"{native_id}.jsonl":
+            return result
+        try:
+            path = path.resolve(strict=True)
+            stat = path.stat()
+        except OSError:
+            return result
+        if path.name != f"{native_id}.jsonl" or not S_ISREG(stat.st_mode):
+            return result
+        result.update(
+            transcript_path=str(path),
+            transcript_offset=stat.st_size,
+            transcript_device=stat.st_dev,
+            transcript_inode=stat.st_ino,
+        )
+        return result
+
+    def _read_native_question_result(self, pending: dict[str, Any]) -> dict[str, Any] | None:
+        """Read only a bounded suffix added after this question was surfaced."""
+        path_text = pending.get("transcript_path")
+        if not path_text:
+            return None
+        try:
+            # Non-blocking/no-follow open also closes the stat→open replacement
+            # race: a FIFO cannot strand the proof worker before fstat rejects it.
+            fd = os.open(path_text, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as stream:
+                stat = os.fstat(stream.fileno())
+                if (
+                    not S_ISREG(stat.st_mode)
+                    or stat.st_dev != pending["transcript_device"]
+                    or stat.st_ino != pending["transcript_inode"]
+                    or stat.st_size < pending["transcript_offset"]
+                ):
+                    raise ControlRecoveryError("The native question transcript changed identity")
+                stream.seek(pending["transcript_offset"])
+                data = stream.read(self._question_transcript_max_bytes + 1)
+        except OSError:
+            return None
+        if len(data) > self._question_transcript_max_bytes:
+            raise ControlRecoveryError("Native question proof exceeded its bounded transcript read")
+        found = None
+        descendants: set[str] = set()
+        for line in data.splitlines():
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue  # A concurrent writer may not have finished its last line.
+            if not isinstance(record, dict) or record.get("isSidechain"):
+                continue
+            native_id = record.get("sessionId", record.get("session_id"))
+            if native_id != pending["native_session_id"]:
+                continue
+            if found is not None:
+                if record.get("parentUuid") not in descendants:
+                    continue
+                if record.get("type") == "system" and record.get("subtype") == "turn_duration":
+                    found["turn_completed"] = True
+                    return found
+                if (
+                    record.get("type") == "user"
+                    and record.get("message")
+                    == {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "[Request interrupted by user for tool use]"}
+                        ],
+                    }
+                    and isinstance(record.get("uuid"), str)
+                ):
+                    descendants.add(record["uuid"])
+                continue
+            if record.get("type") != "user":
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    not isinstance(block, dict)
+                    or block.get("type") != "tool_result"
+                    or block.get("tool_use_id") != pending["native_tool_use_id"]
+                ):
+                    continue
+                result = record.get("toolUseResult")
+                found = {
+                    "is_error": bool(block.get("is_error")),
+                    "answers": result.get("answers") if isinstance(result, dict) else None,
+                    "block": block,
+                    "uuid": record.get("uuid"),
+                }
+                if isinstance(record.get("uuid"), str):
+                    descendants.add(record["uuid"])
+                break
+        return found
+
+    async def _native_question_result(self, pending: dict[str, Any]) -> dict[str, Any] | None:
+        result = pending.get("native_result")
+        if result is None:
+            result = await asyncio.to_thread(self._read_native_question_result, pending)
+        if result is None:
+            return None
+        pending["native_result"] = result
+        tool_id = pending["native_tool_use_id"]
+        frame = result.get("frame")
+        if frame is None:
+            frame = {
+                "type": "user",
+                "message": {"content": [result["block"]]},
+                "metadata": {
+                    "source": "claude_native_transcript",
+                    "claude_session_id": pending["native_session_id"],
+                    "claude_message_id": result.get("uuid"),
+                    "transcript_path": pending.get("transcript_path"),
+                },
+            }
+        await self._emit_question_result_once(tool_id, frame)
+        return result
+
+    async def _emit_question_result_once(self, tool_id: str, frame: dict[str, Any]) -> None:
+        async with self._question_result_emit_lock:
+            if tool_id in self._question_result_ids:
+                return
+            await self._emit(frame)
+            # A failed persistence callback must leave emission retryable. The
+            # native action is already consumed; this never replays TTY keys.
+            self._question_result_ids.append(tool_id)
 
     async def _emit_ask_user_question(self, request_id: str, questions: list) -> None:
         # `event_type` makes the broker flip to awaiting_input (its event_type=="ask_user_question"
@@ -1568,6 +1773,11 @@ class TmuxInteractiveTransport(CLITransport):
                 "metadata": {
                     "source": "tmux_tty_bridge",
                     "control_kind": self._pending_tty_prompts[request_id]["kind"],
+                    **(
+                        {"answerable": False, "recovery_required": True}
+                        if self._pending_tty_prompts[request_id].get("answer_uncertain")
+                        else {}
+                    ),
                 },
             }
         )
@@ -1590,17 +1800,13 @@ class TmuxInteractiveTransport(CLITransport):
         self, request_id: str | None, answers: object, *, pane_id: str | None = None
     ) -> None:
         async with self._answer_lock:
-            await self._answer_tty_prompt_locked(request_id, answers, pane_id=pane_id)
+            async with self._send_lock:
+                await self._answer_tty_prompt_locked(request_id, answers, pane_id=pane_id)
 
     async def _answer_tty_prompt_locked(
         self, request_id: str | None, answers: object, *, pane_id: str | None = None
     ) -> None:
-        """Translate a structured `ask_user_answer` into the keystroke that drives the TTY menu.
-
-        Validate the declared choices and the current menu before sending any
-        keys, including Escape. For AskUserQuestion we confirm the digit with
-        Enter; a permission gate acts on the digit alone.
-        """
+        """Drive the native control once; acknowledge questions only after native proof."""
         pending = self._pending_tty_prompts.get(request_id) if request_id else None
         if pending is None:
             raise ValueError("Unknown or already answered Claude question")
@@ -1610,70 +1816,437 @@ class TmuxInteractiveTransport(CLITransport):
                 "before answering again."
             )
 
-        chosen = self._first_answer_text(answers)
-        if not chosen.strip():
-            raise ValueError("Claude question requires an explicit answer")
         kind = pending.get("kind")
-        questions = pending.get("questions") or []
-        question = questions[0] if questions and isinstance(questions[0], dict) else {}
-        labels = [
-            option["label"].strip().casefold()
-            for option in question.get("options", [])
-            if isinstance(option, dict) and isinstance(option.get("label"), str)
-        ]
-        low = chosen.strip().casefold()
-        first = answers[0] if isinstance(answers, list) and answers else None
-        explicit_text = (
-            isinstance(first, dict)
-            and first.get("free_text") == chosen
-            and not first.get("option_indexes")
-        )
-        freeform = (
-            kind == "question"
-            and bool(question)
-            and ((not labels) or (explicit_text and low not in labels))
-        )
-        if kind == "permission" and low not in {"allow", "allow & don't ask again", "deny"}:
-            raise ValueError("The requested answer is not a declared Claude permission option")
-        if labels and low not in labels and not freeform:
-            raise ValueError("The requested answer is not a declared Claude question option")
-
-        rows = await self._capture_menu_rows_wait(pane_id=pane_id)
         if kind == "permission":
+            chosen = self._first_answer_text(answers)
+            low = chosen.strip().casefold()
+            if low not in {"allow", "allow & don't ask again", "deny"}:
+                raise ValueError("The requested answer is not a declared Claude permission option")
+            rows = await self._capture_menu_rows_wait(pane_id=pane_id)
             digit = self._permission_menu_digit(low, rows)
-        else:
-            live_labels = {label.strip().casefold() for _, label in rows}
-            # Native Other/Chat/Submit rows may be present in addition to the
-            # declared options. Every declared option must still belong to this
-            # menu; a substring in an unrelated menu is not sufficient evidence.
-            if labels and not set(labels).issubset(live_labels):
-                raise ValueError("The live Claude menu does not match the pending question")
-            target = "type something." if freeform else low
-            digit = self._match_menu_digit(target, rows)
-        if digit is None:
-            raise ValueError("The requested answer does not match the live Claude menu")
-
-        if kind == "permission" and low == "deny":
+            if digit is None:
+                raise ValueError("The requested answer does not match the live Claude menu")
             pending["answer_uncertain"] = True
-            await self._send_key("Escape", pane_id=pane_id)
-            self._pending_tty_prompts.pop(request_id, None)
-            await self._emit_ask_user_resolved(request_id, "deny")
+            await self._send_key("Escape" if low == "deny" else str(digit), pane_id=pane_id)
+            await self._resolve_tty_answer(request_id, "deny" if low == "deny" else chosen)
             return
 
-        # A key-send failure may occur after tmux consumed the key. Retain the
-        # question evidence but reject retries until native completion/reissue.
+        plans = self._question_answer_plans(pending.get("questions"), answers)
+        if not pending.get("native_tool_use_id") or not pending.get("native_session_id"):
+            raise ControlRecoveryError("This question has no verifiable native tool identity")
+        result = await self._native_question_result(pending)
+        if result is not None:
+            await self._reject_native_question(request_id, result, pane_id=pane_id)
+            raise ValueError("The native Claude question already completed before this answer")
+        # Validate the first page before claiming an attempt. Later transitions
+        # can already have consumed an answer, so any failure then is uncertain.
+        try:
+            await self._wait_question_screen(
+                lambda screen: self._question_page_matches(screen, plans[0]), pane_id=pane_id
+            )
+        except ValueError:
+            result = await self._native_question_result(pending)
+            if result is not None:
+                await self._reject_native_question(request_id, result, pane_id=pane_id)
+            raise
+        if self._pending_tty_prompts.get(request_id) is not pending:
+            raise ValueError("The native Claude question ended while its menu was rendering")
+        result = await self._native_question_result(pending)
+        if result is not None:
+            await self._reject_native_question(request_id, result, pane_id=pane_id)
+            raise ValueError("The native Claude question already completed before this answer")
         pending["answer_uncertain"] = True
-        await self._send_key(str(digit), pane_id=pane_id)
-        if kind == "question":
-            await self._send_key("Enter", pane_id=pane_id)
-            if freeform:
-                # Literal bracketed paste preserves the user's typed text. Avoid
-                # the composer submit-retry loop: a repeated Enter can answer the
-                # next question after this one has already completed.
-                await self._paste_text(chosen, enter=False, pane_id=pane_id)
-                await self._send_key("Enter", pane_id=pane_id)
+        pending["answer_in_flight"] = True
+        try:
+            for plan in plans:
+                await self._drive_question_page(plan, pane_id=pane_id)
+            if len(plans) > 1 or any(plan["multi"] for plan in plans):
+                review = await self._wait_question_screen(
+                    lambda screen: self._question_review_matches(screen, plans), pane_id=pane_id
+                )
+                digit = self._match_menu_digit("Submit answers", self._menu_rows(review))
+                await self._send_key(str(digit), pane_id=pane_id)
+            result = await self._wait_native_question_result(pending)
+            actual = result.get("answers")
+            matched = (
+                not result["is_error"]
+                and isinstance(actual, dict)
+                and set(actual) == {plan["text"] for plan in plans}
+                and all(self._question_answer_matches(actual[plan["text"]], plan) for plan in plans)
+            )
+            if not matched:
+                await self._reject_native_question(request_id, result, pane_id=pane_id)
+                raise ValueError("Claude did not consume the requested question answers")
+            decision = (
+                plans[0]["values"][0] if len(plans) == 1 and not plans[0]["multi"] else "answered"
+            )
+            await self._resolve_tty_answer(request_id, decision)
+        except Exception as exc:
+            if request_id in self._pending_tty_prompts:
+                result = await self._native_question_result(pending)
+                if result is not None and not pending.get("resolution_pending"):
+                    await self._reject_native_question(request_id, result, pane_id=pane_id)
+                    raise ValueError(
+                        "Claude question completed outside the expected answer state"
+                    ) from exc
+                await self._emit_ask_user_question(request_id, pending["questions"])
+                raise ControlRecoveryError(
+                    "Claude answer consumption is uncertain; inspect the native question "
+                    "before retrying"
+                ) from exc
+            raise
+        finally:
+            pending.pop("answer_in_flight", None)
+
+    async def _resolve_tty_answer(
+        self, request_id: str | None, decision: str, *, accepted: bool = True
+    ) -> None:
+        pending = self._pending_tty_prompts.get(request_id)
+        if pending is not None:
+            pending["answer_uncertain"] = True
+            pending["resolution_pending"] = True
+        try:
+            await self._emit_ask_user_resolved(request_id, decision, accepted=accepted)
+        except Exception as exc:
+            if pending is not None:
+                await self._emit_ask_user_question(request_id, pending["questions"])
+            raise ControlRecoveryError(
+                "The native control completed but its acknowledgment could not be persisted"
+            ) from exc
         self._pending_tty_prompts.pop(request_id, None)
-        await self._emit_ask_user_resolved(request_id, chosen or "answered")
+
+    async def _reject_native_question(
+        self, request_id: str | None, result: dict[str, Any], *, pane_id: str | None
+    ) -> None:
+        pending = self._pending_tty_prompts.get(request_id)
+        await self._resolve_tty_answer(request_id, "native_answer_rejected", accepted=False)
+        if not result["is_error"] or not self._turn_active:
+            return
+        # Cancellation skips PostToolUse/Stop in native Claude. Only an exact
+        # failed tool result followed by its own descendant native turn_duration
+        # record closes this turn. An idle-looking composer is not completion.
+        deadline = time.monotonic() + max(self._question_result_wait_s, 0.0)
+        while pending and pending.get("transcript_path") and not result.get("turn_completed"):
+            refreshed = await asyncio.to_thread(self._read_native_question_result, pending)
+            if refreshed is not None:
+                result = refreshed
+            if result.get("turn_completed") or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(self._menu_poll_step_s)
+        if result.get("turn_completed"):
+            await self._finish_hook_turn(
+                content="", reason="native_question_rejected", is_error=True
+            )
+
+    @staticmethod
+    def _question_answer_plans(questions: object, answers: object) -> list[dict[str, Any]]:
+        """Validate every question/answer association before the first terminal write."""
+        if (
+            not isinstance(questions, list)
+            or not questions
+            or not all(isinstance(q, dict) for q in questions)
+        ):
+            raise ValueError("Claude question descriptors are invalid")
+        if isinstance(answers, str) and len(questions) == 1:
+            answers = [{"answer": answers}]
+        if (
+            not isinstance(answers, list)
+            or len(answers) != len(questions)
+            or not all(isinstance(a, dict) for a in answers)
+        ):
+            raise ValueError("Claude requires one explicit answer for every question")
+        texts = [q.get("question") for q in questions]
+        if any(not isinstance(t, str) or not t.strip() for t in texts) or len(set(texts)) != len(
+            texts
+        ):
+            raise ValueError("Claude question identities are ambiguous")
+        unused = list(answers)
+        plans = []
+        for index, question in enumerate(questions):
+            text = question["question"]
+            named = [
+                a
+                for a in unused
+                if (question.get("id") and a.get("question_id") == question["id"])
+                or a.get("question") == text
+            ]
+            if len(named) > 1:
+                raise ValueError("Duplicate answers for a Claude question")
+            answer = named[0] if named else answers[index]
+            if answer not in unused or (
+                not named and (answer.get("question_id") or answer.get("question"))
+            ):
+                raise ValueError("The answer does not identify the pending Claude question")
+            unused.remove(answer)
+            raw = answer.get("answer")
+            values = raw if isinstance(raw, list) else [raw]
+            if not values or any(not isinstance(v, str) or not v.strip() for v in values):
+                raise ValueError("Claude question requires explicit non-empty answers")
+            multi = bool(question.get("multiSelect"))
+            if len(values) > 1 and not multi:
+                raise ValueError("A single-select Claude question accepts only one option")
+            options = question.get("options", [])
+            if not isinstance(options, list):
+                raise ValueError("Claude question options must be a list")
+            labels = [
+                o["label"]
+                for o in options
+                if isinstance(o, dict) and isinstance(o.get("label"), str)
+            ]
+            canonical = {label.strip().casefold(): label for label in labels}
+            if len(canonical) != len(labels):
+                raise ValueError("Claude option labels are ambiguous")
+            free_text = answer.get("free_text")
+            if free_text not in (None, "") and (
+                not isinstance(free_text, str) or free_text not in values
+            ):
+                raise ValueError("Claude custom text disagrees with its answer")
+            mapped = []
+            custom = None
+            for value in values:
+                label = canonical.get(value.strip().casefold())
+                if label is not None and free_text != value:
+                    mapped.append(label)
+                elif (not labels or free_text == value) and (
+                    multi or not answer.get("option_indexes")
+                ):
+                    if custom is not None or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                        raise ValueError("Claude custom answer requires a single literal text row")
+                    custom = value
+                    mapped.append(value)
+                else:
+                    raise ValueError(
+                        "The requested answer is not a declared Claude question option"
+                    )
+            if len(set(mapped)) != len(mapped):
+                raise ValueError("Duplicate Claude option selections")
+            if multi and custom in labels:
+                raise ValueError(
+                    "Claude checkbox custom text duplicates a declared label; "
+                    "the native answer cannot distinguish these choices"
+                )
+            indexes = answer.get("option_indexes")
+            if indexes is not None and not isinstance(indexes, list):
+                raise ValueError("Claude option indexes must be a list")
+            if indexes:
+                if (
+                    not isinstance(indexes, list)
+                    or any(type(i) is not int or i < 0 or i >= len(labels) for i in indexes)
+                    or len(set(indexes)) != len(indexes)
+                    or {labels[i] for i in indexes}
+                    != set(mapped) - ({custom} if custom is not None else set())
+                ):
+                    raise ValueError("Claude option indexes disagree with the selected labels")
+            plans.append(
+                {
+                    "question": question,
+                    "text": text,
+                    "labels": labels,
+                    "values": mapped,
+                    "custom": custom,
+                    "multi": multi,
+                }
+            )
+        return plans
+
+    @staticmethod
+    def _question_answer_matches(actual: object, plan: dict[str, Any]) -> bool:
+        values = plan["values"]
+        if not plan["multi"]:
+            return actual == values[0]
+        if isinstance(actual, str):
+            if actual == ", ".join(values):
+                return True
+            if any(", " in value for value in values):
+                return False  # A lossy delimiter cannot prove a different ordering.
+            actual = actual.split(", ")
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(values)
+            and all(isinstance(v, str) for v in actual)
+            and set(actual) == set(values)
+        )
+
+    @staticmethod
+    def _menu_rows(screen: str) -> list[tuple[int, str]]:
+        rows: list[tuple[int, str]] = []
+        for line in screen.splitlines():
+            match = _MENU_ROW_RE.match(line)
+            if match:
+                digit = int(match.group(1))
+                if rows and digit <= rows[-1][0]:
+                    rows.clear()
+                rows.append((digit, match.group(2).strip()))
+        return rows
+
+    async def _capture_question_screen(self, *, pane_id: str | None = None) -> str:
+        capture = await self._run_tmux("capture-pane", "-t", self._target_pane(pane_id), "-p")
+        lines = _ANSI_RE.sub("", capture.stdout).splitlines()
+        starts = [i for i, line in enumerate(lines) if "☐" in line or "☒" in line]
+        return "\n".join(lines[starts[-1] :]) if starts else ""
+
+    async def _wait_question_screen(
+        self, predicate: Callable[[str], bool], *, pane_id: str | None = None
+    ) -> str:
+        deadline = time.monotonic() + max(self._menu_render_wait_s, 0.0)
+        while True:
+            screen = await self._capture_question_screen(pane_id=pane_id)
+            if predicate(screen):
+                return screen
+            if time.monotonic() >= deadline:
+                raise ValueError("The live Claude menu does not match the pending question state")
+            await asyncio.sleep(self._menu_poll_step_s)
+
+    @staticmethod
+    def _question_page_matches(screen: str, plan: dict[str, Any]) -> bool:
+        if not screen or "Review your answers" in screen:
+            return False
+        # Only the active widget is inspected; matching words in scrollback or
+        # an earlier page cannot authorize another key.
+        lines = screen.splitlines()
+        first_row = next(
+            (i for i, line in enumerate(lines) if _MENU_ROW_RE.match(line)), len(lines)
+        )
+        if " ".join(plan["text"].split()) != " ".join(" ".join(lines[1:first_row]).split()):
+            return False
+        rows = TmuxInteractiveTransport._menu_rows(screen)
+        labels = []
+        for _, label in rows:
+            checkbox = re.match(r"^\[([ ✔xX])\]\s+(.+)$", label)
+            if plan["multi"] and checkbox:
+                label = checkbox.group(2)
+            elif plan["multi"] and label != "Chat about this":
+                return False
+            labels.append(label)
+        return all(label in labels for label in plan["labels"])
+
+    @staticmethod
+    def _question_review_matches(screen: str, plans: list[dict[str, Any]]) -> bool:
+        if "Review your answers" not in screen or "Ready to submit your answers?" not in screen:
+            return False
+        if TmuxInteractiveTransport._menu_rows(screen) != [(1, "Submit answers"), (2, "Cancel")]:
+            return False
+        observed: dict[str, str] = {}
+        question = None
+        for line in screen.splitlines():
+            value = line.strip()
+            if value.startswith("● "):
+                question = value[2:]
+            elif value.startswith("→ ") and question is not None:
+                if question in observed:
+                    return False
+                observed[question] = value[2:]
+                question = None
+        return set(observed) == {p["text"] for p in plans} and all(
+            TmuxInteractiveTransport._question_answer_matches(observed[p["text"]], p) for p in plans
+        )
+
+    async def _drive_question_page(self, plan: dict[str, Any], *, pane_id: str | None) -> None:
+        screen = await self._wait_question_screen(
+            lambda s: self._question_page_matches(s, plan), pane_id=pane_id
+        )
+        rows = self._menu_rows(screen)
+        if plan["multi"]:
+            await self._drive_checkbox_page(plan, screen, pane_id=pane_id)
+            return
+        target = "Type something." if plan["custom"] is not None else plan["values"][0]
+        digit = self._match_menu_digit(target, rows)
+        if digit is None:
+            raise ValueError("The requested answer does not match the live Claude menu")
+        await self._send_key(str(digit), pane_id=pane_id)
+        if plan["custom"] is not None:
+            await self._enter_question_text(plan, digit, pane_id=pane_id)
+
+    async def _enter_question_text(
+        self, plan: dict[str, Any], digit: int, *, pane_id: str | None
+    ) -> None:
+        def editor(screen: str, text: str) -> bool:
+            return (
+                self._question_page_matches(screen, plan)
+                and "ctrl+g to edit" in screen
+                and any(
+                    re.match(rf"^\s*❯\s+{digit}\.\s+(?:\[[ ✔xX]\]\s+)?{re.escape(text)}\s*$", line)
+                    for line in screen.splitlines()
+                )
+            )
+
+        await self._wait_question_screen(
+            lambda s: editor(s, "Type something" + ("" if plan["multi"] else ".")), pane_id=pane_id
+        )
+        await self._paste_text(plan["custom"], enter=False, pane_id=pane_id)
+        await self._wait_question_screen(lambda s: editor(s, plan["custom"]), pane_id=pane_id)
+        # In native Claude this Enter commits the populated editor. An Enter
+        # before the paste rejects the entire question instead.
+        await self._send_key("Enter", pane_id=pane_id)
+
+    @staticmethod
+    def _checkbox_values(screen: str) -> dict[str, tuple[int, bool]]:
+        result = {}
+        for digit, label in TmuxInteractiveTransport._menu_rows(screen):
+            match = re.match(r"^\[([ ✔xX])\]\s+(.+)$", label)
+            if match:
+                result[match.group(2)] = (digit, match.group(1) != " ")
+        return result
+
+    async def _drive_checkbox_page(
+        self, plan: dict[str, Any], screen: str, *, pane_id: str | None
+    ) -> None:
+        expected = set(plan["values"])
+        for label in plan["labels"]:
+            rows = self._checkbox_values(screen)
+            digit, checked = rows[label]
+            if checked != (label in expected):
+                await self._send_key(str(digit), pane_id=pane_id)
+                screen = await self._wait_question_screen(
+                    lambda s: (
+                        self._question_page_matches(s, plan)
+                        and self._checkbox_values(s).get(label) == (digit, label in expected)
+                    ),
+                    pane_id=pane_id,
+                )
+        if plan["custom"] is not None:
+            digit = self._checkbox_values(screen).get("Type something", (None, False))[0]
+            if digit is None:
+                raise ValueError("The native checkbox menu has no custom answer row")
+            await self._send_key(str(digit), pane_id=pane_id)
+            await self._enter_question_text(plan, digit, pane_id=pane_id)
+        # Digit shortcuts toggle boxes without moving focus. Enter toggles the
+        # focused box; it submits only after the unnumbered Submit gains focus.
+        for _ in range(len(plan["labels"]) + 2):
+            screen = await self._wait_question_screen(
+                lambda s: self._question_page_matches(s, plan), pane_id=pane_id
+            )
+            checked = {
+                label for label, (_, selected) in self._checkbox_values(screen).items() if selected
+            }
+            if checked != expected:
+                raise ValueError("The native checkbox selections differ from the requested answers")
+            if any(re.match(r"^\s*❯\s+Submit\s*$", line) for line in screen.splitlines()):
+                await self._send_key("Enter", pane_id=pane_id)
+                return
+            focus = next(
+                (line for line in screen.splitlines() if line.lstrip().startswith("❯")), None
+            )
+            if focus is None:
+                raise ValueError("The native checkbox focus is unknown")
+            await self._send_key("Down", pane_id=pane_id)
+            await self._wait_question_screen(
+                lambda s: self._question_page_matches(s, plan) and focus not in s.splitlines(),
+                pane_id=pane_id,
+            )
+        raise ValueError("The native checkbox Submit control was not reached")
+
+    async def _wait_native_question_result(self, pending: dict[str, Any]) -> dict[str, Any]:
+        deadline = time.monotonic() + max(self._question_result_wait_s, 0.0)
+        while True:
+            result = await self._native_question_result(pending)
+            if result is not None:
+                return result
+            if time.monotonic() >= deadline:
+                raise ControlRecoveryError(
+                    "Claude has not confirmed consumption of this question answer"
+                )
+            await asyncio.sleep(self._menu_poll_step_s)
 
     async def _capture_menu_rows_wait(self, *, pane_id: str | None = None) -> list[tuple[int, str]]:
         """Capture the numbered menu, bound-polling until it renders (E3 race fix).
@@ -1777,9 +2350,13 @@ class TmuxInteractiveTransport(CLITransport):
         client dismisses its stale card instead of stranding it."""
         if not self._pending_tty_prompts:
             return
-        stale = list(self._pending_tty_prompts.keys())
-        self._pending_tty_prompts.clear()
+        stale = [
+            rid
+            for rid, pending in self._pending_tty_prompts.items()
+            if not pending.get("answer_in_flight")
+        ]
         for request_id in stale:
+            self._pending_tty_prompts.pop(request_id, None)
             await self._emit_ask_user_resolved(request_id, reason, accepted=False)
 
     async def _finish_hook_turn(

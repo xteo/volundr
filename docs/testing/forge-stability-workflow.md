@@ -38,8 +38,8 @@ make test-forge-web
 uv run python scripts/verify_forge.py unit
 ```
 
-The new isolated coverage gate intentionally fails until measured coverage reaches
-85%. It does not replace or reduce the existing backend/web coverage requirements.
+The isolated coverage gate requires measured coverage of at least 85%. It does
+not replace or reduce the existing backend/web coverage requirements.
 Do not omit files, reduce the threshold or convert failures to skips to clear it.
 
 `scripts/verify_forge.py` supports `unit`, `tmux`, `database`, `web`, `live-grok`,
@@ -49,10 +49,9 @@ elapsed time, exit status, test counts and skip reasons. Override the directory
 with `--artifacts /path/to/run`. Old reports are removed before executing a run.
 
 The required tmux/database/live lanes fail if no tests execute, if the command
-fails, or if an unexpected test skips. The sole current tmux exception is the
-named, strict multiselect expected failure. An ordinary skip with the same test
-name is rejected. A fixed limitation should remove its xfail and its allowlist
-entry together.
+fails, or if a test skips, including an expected failure. The former multiselect
+exception was removed with the native-style checkbox regression; it now has to
+execute and pass. There is no remaining tmux expected-failure allowlist.
 
 Artifact uploads explicitly include the report directory because
 [GitHub's upload action excludes hidden directories by default](https://github.com/actions/upload-artifact#uploading-hidden-files).
@@ -95,8 +94,10 @@ accepts a correctly surfaced no-credential error; **that does not qualify as a
 successful authenticated Muse canary**. A release canary must require an actual
 successful turn and record it separately.
 
-There is not yet a complete, credentialed Claude/Codex/other-provider canary
-through the served platform. The remaining sections specify its acceptance. Do
+The [live agentic workflow](forge-live-agentic-acceptance.md) provides credentialed
+Claude tmux/Codex scenarios through the served platform. The
+[native question extension](forge-native-question-acceptance.md) adds rich answers
+and actual iOS controls. Other-provider expansion remains separately scoped. Do
 not use real tokens in pull-request workflows or point synthetic destructive
 tool prompts at an existing user workspace.
 

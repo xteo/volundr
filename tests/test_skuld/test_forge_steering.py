@@ -56,7 +56,7 @@ def _page(h: BrokerHarness) -> TmuxPage:
     transport = h.transport
     return TmuxPage(
         str(transport._socket_path),  # noqa: SLF001 - test seam
-        transport.session_id or "",
+        transport._session_name,
     )
 
 

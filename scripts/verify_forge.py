@@ -34,9 +34,6 @@ UNIT_PATHS = [
     "tests/test_niuu/test_rest_volundr.py",
 ]
 LANES = ("unit", "tmux", "database", "web", "live-grok", "live-muse")
-KNOWN_TMUX_XFAIL = (
-    "tests.test_skuld.test_forge_questions.test_e4_multiselect_maps_selection_then_submit"
-)
 
 
 def inspect_junit(path: Path, *, strict_skips: bool = False) -> dict:
@@ -50,9 +47,7 @@ def inspect_junit(path: Path, *, strict_skips: bool = False) -> dict:
         skip = case.find("skipped")
         if skip is not None:
             result["skipped"].append({"test": identity, "reason": skip.get("message", "")})
-            if strict_skips and not (
-                identity == KNOWN_TMUX_XFAIL and skip.get("type") == "pytest.xfail"
-            ):
+            if strict_skips:
                 raise ValueError(f"required test did not execute: {identity}")
             continue
         if case.find("failure") is not None or case.find("error") is not None:

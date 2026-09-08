@@ -1290,10 +1290,18 @@ async def test_answer_deny_presses_escape(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_ask_user_question_tool_surfaces_and_answers(tmp_path: Path) -> None:
-    transport = FakeTmuxInteractiveTransport(str(tmp_path))
+    from tests.test_skuld.test_tmux_native_question_consumption import (
+        NATIVE_ID,
+        TOOL_ID,
+        NativeQuestionTransport,
+    )
+
+    transport = NativeQuestionTransport(str(tmp_path))
     events = await _collect_events(transport)
     await transport.start()
-    transport.capture_stdout = "\n".join(["❯ 1. Postgres", "  2. SQLite", ""])
+    transport.capture_stdout = "\n".join(
+        ["☐ Database", "Which DB?", "❯ 1. Postgres", "  2. SQLite", ""]
+    )
 
     questions = [
         {
@@ -1308,6 +1316,9 @@ async def test_ask_user_question_tool_surfaces_and_answers(tmp_path: Path) -> No
             "hook_event_name": "PreToolUse",
             "tool_name": "AskUserQuestion",
             "tool_input": {"questions": questions},
+            "session_id": NATIVE_ID,
+            "tool_use_id": TOOL_ID,
+            "transcript_path": str(transport.native_path),
         }
     )
 
@@ -1322,9 +1333,11 @@ async def test_ask_user_question_tool_surfaces_and_answers(tmp_path: Path) -> No
         for e in events
     )
 
+    transport.steps.append(("2", "❯\n"))
+    transport.consumed = {"answers": {"Which DB?": "SQLite"}}
     await transport.send_control("ask_user_answer", request_id=rid, answers=[{"answer": "SQLite"}])
     keys = _send_keys(transport)
-    assert keys[-2:] == ["2", "Enter"]  # select row 2 + confirm
+    assert keys == ["2"]  # Native selection commits on its digit, then exact result proves it.
     await transport.stop()
 
 

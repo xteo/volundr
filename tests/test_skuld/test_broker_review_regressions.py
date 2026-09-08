@@ -21,6 +21,8 @@ from skuld.delivery_claims import DeliveryClaimError, claim_message, settle_mess
 from skuld.live_frames import prepare_live_frame
 from skuld.transports.codex_ws import CodexWebSocketTransport
 from skuld.transports.tmux_interactive import TmuxInteractiveTransport
+from tests.test_skuld.test_tmux_interactive_transport import _collect_events, _send_keys
+from tests.test_skuld.test_tmux_native_question_consumption import NativeQuestionTransport
 
 
 def _broker(tmp_path, *, api_url="http://forge.test"):
@@ -238,21 +240,42 @@ async def test_settlement_must_explicitly_confirm_terminal_state(response):
             )
 
 
+async def _native_tmux_question(tmp_path, request_id="question"):
+    """A native-identified question with proof written only after its submit key."""
+    transport = NativeQuestionTransport(str(tmp_path))
+    transport._alive = True
+    transport.capture_stdout = "☐ Choice\nChoose\n❯ 1. A\n  2. B\n  3. Type something.\n"
+    native_request_id = await transport.surface(
+        [
+            {
+                "id": "q",
+                "header": "Choice",
+                "question": "Choose",
+                "options": [{"label": "A"}, {"label": "B"}],
+                "multiSelect": False,
+            }
+        ]
+    )
+    transport._pending_tty_prompts[request_id] = transport._pending_tty_prompts.pop(
+        native_request_id
+    )
+    return transport
+
+
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 async def test_bad_answer_is_correlated_and_does_not_interrupt_valid_next_control(
     tmp_path, provider
 ):
     broker = _broker(tmp_path)
     transport = (
-        TmuxInteractiveTransport(workspace_dir=str(tmp_path))
+        await _native_tmux_question(tmp_path, "correct")
         if provider == "claude"
         else CodexWebSocketTransport(workspace_dir=str(tmp_path))
     )
     transport._alive = True
     if provider == "claude":
-        transport._pending_tty_prompts["correct"] = {"kind": "question"}
-        transport._capture_menu_rows_wait = AsyncMock(return_value=[(1, "A"), (2, "B")])
-        transport._send_key = AsyncMock()
+        transport.steps.append(("2", "❯\n"))
+        transport.consumed = {"answers": {"Choose": "B"}}
     else:
         transport._pending_user_inputs["correct"] = (7, [{"id": "q", "question": "Choose"}])
         transport._send_rpc_response = AsyncMock()
@@ -284,6 +307,9 @@ async def test_bad_answer_is_correlated_and_does_not_interrupt_valid_next_contro
     assert _events(broker, "ask_user_resolved")[-1]["accepted"] is True
     assert not _events(broker, "result")
     assert broker._conversation_turns == []
+    if provider == "claude":
+        assert _send_keys(transport) == ["2"]
+        assert len(_events(broker, "ask_user_resolved")) == 1
 
 
 @pytest.mark.parametrize("identity", [None, "", "stale"])
@@ -299,41 +325,49 @@ async def test_tmux_unknown_id_never_targets_sole_remaining_prompt(tmp_path, ide
 
 @pytest.mark.parametrize("answer,rows", [("", [(1, "A")]), ("B", []), ("B", [(1, "A")])])
 async def test_tmux_unknown_or_unrendered_choice_never_selects_default(tmp_path, answer, rows):
-    transport = TmuxInteractiveTransport(workspace_dir=str(tmp_path))
-    transport._pending_tty_prompts["question"] = {"kind": "question"}
-    transport._capture_menu_rows_wait = AsyncMock(return_value=rows)
+    transport = await _native_tmux_question(tmp_path)
+    transport.capture_stdout = "☐ Choice\nChoose\n" + "\n".join(
+        f"  {digit}. {label}" for digit, label in rows
+    )
     transport._send_key = AsyncMock()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="explicit non-empty answers|live Claude menu"):
         await transport._answer_tty_prompt("question", answer)
     transport._send_key.assert_not_called()
     assert "question" in transport._pending_tty_prompts
 
 
 async def test_tmux_failed_key_send_preserves_evidence_without_blind_answer_retry(tmp_path):
-    transport = TmuxInteractiveTransport(workspace_dir=str(tmp_path))
-    transport._pending_tty_prompts["question"] = {"kind": "question"}
-    transport._capture_menu_rows_wait = AsyncMock(return_value=[(1, "A")])
+    transport = await _native_tmux_question(tmp_path)
+    events = await _collect_events(transport)
     transport._send_key = AsyncMock(side_effect=RuntimeError("pane gone"))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ControlRecoveryError, match="uncertain") as failure:
         await transport._answer_tty_prompt("question", "A")
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert str(failure.value.__cause__) == "pane gone"
     assert "question" in transport._pending_tty_prompts
+    assert events[-1]["type"] == "ask_user_question"
+    assert events[-1]["metadata"]["answerable"] is False
     with pytest.raises(ControlRecoveryError):
         await transport._answer_tty_prompt("question", "A")
     transport._send_key.assert_awaited_once()
 
 
 async def test_tmux_duplicate_answer_serializes(tmp_path):
-    transport = TmuxInteractiveTransport(workspace_dir=str(tmp_path))
-    transport._pending_tty_prompts["question"] = {"kind": "question"}
-    transport._capture_menu_rows_wait = AsyncMock(return_value=[(1, "A")])
-    transport._send_key = AsyncMock()
+    transport = await _native_tmux_question(tmp_path)
+    events = await _collect_events(transport)
+    transport.steps.append(("1", "❯\n"))
+    transport.consumed = {"answers": {"Choose": "A"}}
     outcomes = await asyncio.gather(
         transport._answer_tty_prompt("question", "A"),
         transport._answer_tty_prompt("question", "A"),
         return_exceptions=True,
     )
     assert sum(isinstance(result, ValueError) for result in outcomes) == 1
-    assert transport._send_key.await_count == 2  # one digit plus Enter, once
+    assert outcomes.count(None) == 1
+    assert _send_keys(transport) == ["1"]  # Native choice commits on its digit, once.
+    resolved = [event for event in events if event.get("type") == "ask_user_resolved"]
+    assert len(resolved) == 1 and resolved[0]["accepted"] is True
+    assert resolved[0]["request_id"] == "question"
 
 
 async def test_restarted_codex_never_reuses_public_question_or_approval_identity(tmp_path):

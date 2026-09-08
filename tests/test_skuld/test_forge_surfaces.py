@@ -114,7 +114,7 @@ class _StandaloneTransport:
         await self.transport.start()
         self.page = TmuxPage(
             str(self.transport._socket_path),  # noqa: SLF001 - test seam
-            self.transport.session_id or "",
+            self.transport._session_name,
         )
         await self.page.wait_for_text("fakeagent ready", timeout=5.0)
         return self
@@ -223,13 +223,13 @@ async def test_g2_running_agents_as_multiple_panes(tmp_path: Path) -> None:
     _require_tmux()
 
     async with BrokerHarness(hooks=True, idle_timeout_s=0.3, start_transport=True) as h:
-        page = TmuxPage(str(h.transport._socket_path), h.transport.session_id or "")  # noqa: SLF001
+        page = TmuxPage(str(h.transport._socket_path), h.transport._session_name)  # noqa: SLF001
         await page.wait_for_text("fakeagent ready", timeout=5.0)
 
         # One pane per running agent — each renders its own one-line screen.
         await split_into_panes(
             str(h.transport._socket_path),  # noqa: SLF001
-            h.transport.session_id or "",
+            h.transport._session_name,
             [
                 ("a1", "screen:team_architect"),
                 ("a2", "screen:team_builder"),
@@ -270,7 +270,7 @@ async def test_g2_multipane_emits_real_pane_opened_events(tmp_path: Path) -> Non
 
         await split_into_panes(
             str(h.transport._socket_path),  # noqa: SLF001
-            h.transport.session_id or "",
+            h.transport._session_name,
             [("b1", "pane:team_builder"), ("b2", "pane:team_reviewer")],
         )
 
@@ -367,7 +367,7 @@ async def test_g4_team_panes_steer_routes_to_targeted_agent(tmp_path: Path) -> N
 
         layout = await split_into_panes(
             str(h.transport._socket_path),  # noqa: SLF001
-            h.transport.session_id or "",
+            h.transport._session_name,
             [
                 ("architect", "pane:team_architect"),
                 ("builder", "pane:team_builder"),

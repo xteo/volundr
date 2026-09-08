@@ -228,6 +228,7 @@ class BrokerHarness:
         # the fakeagent FORGE_FAKEAGENT_SESSION, so crash_agent() can pkill the
         # exact agent process without touching unrelated sessions.
         self._token = f"bh-{uuid.uuid4().hex[:8]}"
+        self._native_session_id = str(uuid.uuid4())
 
         self.broker: Broker | None = None
         self.transport: TmuxInteractiveTransport | None = None
@@ -235,6 +236,7 @@ class BrokerHarness:
         self._clients: list[FakeWsClient] = []
         self._old_env: dict[str, str | None] = {}
         self._started = False
+        self._delivery_claims: dict[str, dict[str, Any]] = {}
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -255,6 +257,7 @@ class BrokerHarness:
         # The fakeagent reads this to name its Stop-hook session id, and we
         # reuse the token to find + kill its process for crash_agent().
         env_mutations["FORGE_FAKEAGENT_SESSION"] = self._token
+        env_mutations["FORGE_FAKEAGENT_NATIVE_SESSION"] = self._native_session_id
         # Remote Control would try to register with claude.ai — force it off.
         env_mutations["SKULD__TMUX_REMOTE_CONTROL"] = "0"
         self._apply_env(env_mutations)
@@ -267,6 +270,9 @@ class BrokerHarness:
         self.transport = TmuxInteractiveTransport(
             workspace_dir=str(workspace_dir),
             session_id=self._token,
+            # A real resumed native identity also covers questions emitted by
+            # the fake's boot directive before a browser submits a new prompt.
+            resume_session_id=self._native_session_id,
             skip_permissions=self._skip_permissions,
             sdk_port=sdk_port,
             turn_idle_timeout_s=self._idle_timeout_s,
@@ -293,7 +299,7 @@ class BrokerHarness:
         # must never cause DNS or real network traffic during a tmux test.
         self.broker._http_client = httpx.AsyncClient(
             base_url="http://harness.invalid",
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+            transport=httpx.MockTransport(self._platform_response),
         )
         # Minimal manual wiring — no startup(): hand the transport to the broker
         # and route its events into the broker's CLI pipeline.
@@ -333,6 +339,52 @@ class BrokerHarness:
         self._started = False
 
     # ------------------------------------------------------------------- hooks
+
+    def _platform_response(self, request: httpx.Request) -> httpx.Response:
+        """Model the delivery ledger HTTP boundary; never execute a native send.
+
+        A same-content claim can only dispatch while its original token remains
+        pending. Different content, settlement tokens, or terminal rewrites are
+        conflicts, matching the platform contract used by the real broker.
+        """
+        prefix, marker, suffix = request.url.path.partition("/message-deliveries/")
+        if not marker:
+            return httpx.Response(200, json={})
+        request_id, _, operation = suffix.partition("/")
+        key = f"{prefix}/{request_id}"
+        body = json.loads(request.content) if request.content else {}
+        row = self._delivery_claims.get(key)
+        if operation == "claim":
+            if row is None:
+                row = {**body, "status": "pending", "error": None}
+                self._delivery_claims[key] = row
+            if row["payload_hash"] != body["payload_hash"]:
+                return httpx.Response(409, json={"detail": "request_id content conflict"})
+            claimed = row["claim_token"] == body["claim_token"] and row["status"] == "pending"
+        elif operation == "settle":
+            if row is None:
+                return httpx.Response(404, json={"detail": "No claim"})
+            if row["claim_token"] != body["claim_token"] or (
+                row["status"] != "pending" and row["status"] != body["status"]
+            ):
+                return httpx.Response(409, json={"detail": "Claim settlement conflict"})
+            assert body["status"] in {"delivered", "failed"}
+            if row["status"] == "pending":
+                row.update(status=body["status"], error=body.get("error"))
+            claimed = False
+        else:
+            if row is None:
+                return httpx.Response(404, json={"detail": "No claim"})
+            claimed = False
+        return httpx.Response(
+            200,
+            json={
+                "request_id": request_id,
+                "status": row["status"],
+                "claimed": claimed,
+                "error": row["error"],
+            },
+        )
 
     async def _hook_handler(self, payload: dict[str, Any]) -> Any:
         if self.broker is None:

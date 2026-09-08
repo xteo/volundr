@@ -5,6 +5,10 @@ with Claude Code in tmux and Codex app-server as the active providers. It builds
 on the [stability review](forge-stability-review-2026-09-07.md) and
 [deterministic fault workflow](forge-stability-workflow.md).
 
+The [native question acceptance extension](forge-native-question-acceptance.md)
+adds actual iOS custom answers, restored drafts, multiple questions and checkbox
+navigation, requiring native tool-result proof before a positive Forge receipt.
+
 The goal is evidence that a real provider performed an action, Skuld captured
 it, PostgreSQL retained it, and a reconnecting client can reconstruct it. A
 plausible assistant answer is insufficient. A passing fixture does not certify

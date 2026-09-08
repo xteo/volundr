@@ -2,7 +2,7 @@
 
 import pytest
 
-from scripts.verify_forge import KNOWN_TMUX_XFAIL, command_for, inspect_junit
+from scripts.verify_forge import command_for, inspect_junit
 
 
 @pytest.mark.parametrize(
@@ -25,17 +25,17 @@ def test_required_lane_rejects_even_one_unexpected_skip(tmp_path):
         inspect_junit(report, strict_skips=True)
 
 
-def test_tmux_only_accepts_the_named_documented_expected_failure(tmp_path):
-    classname, name = KNOWN_TMUX_XFAIL.rsplit(".", 1)
+@pytest.mark.parametrize("skip_type", ["pytest.xfail", "pytest.skip"])
+def test_required_lane_rejects_skipping_the_former_multiselect_gap(tmp_path, skip_type):
+    classname = "tests.test_skuld.test_forge_questions"
+    name = "test_e4_multiselect_maps_selection_then_submit"
     report = tmp_path / "junit.xml"
     report.write_text(
         '<testsuite><testcase name="ran"/>'
         f'<testcase classname="{classname}" name="{name}">'
-        '<skipped type="pytest.xfail"/></testcase></testsuite>'
+        f'<skipped type="{skip_type}"/></testcase></testsuite>'
     )
-    assert inspect_junit(report, strict_skips=True)["passed"] == 1
-    report.write_text(report.read_text().replace('type="pytest.xfail"', 'type="pytest.skip"'))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="did not execute"):
         inspect_junit(report, strict_skips=True)
 
 
